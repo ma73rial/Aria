@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARIA — AI Coding Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- SIDEBAR -->
+  <div id="sidebar" class="hide">
+    <div class="sb-head">
+      <span class="sb-logo">ARIA</span>
+      <button class="ibtn" id="close-sb" title="Close">
+        <svg viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="sb-body">
+
+      <div class="sb-sect">
+        <div class="sb-label">Mode</div>
+        <div class="mode-row">
+          <button class="mode-btn plan" data-mode="plan">Plan</button>
+          <button class="mode-btn on" data-mode="edit">Edit</button>
+          <button class="mode-btn yolo" data-mode="yolo">YOLO</button>
+        </div>
+      </div>
+
+      <div class="sb-sect">
+        <div class="sb-label">Workspace</div>
+        <div class="btn-row" style="margin-bottom:5px;">
+          <button class="btn sm" id="open-folder-btn" style="flex:1;">Open Folder</button>
+          <button class="btn sm" id="new-idb-btn" style="flex:1;">New Session</button>
+        </div>
+        <div id="fs-info" style="font-size:10px;color:var(--txt3);font-family:var(--mono);min-height:14px;"></div>
+      </div>
+
+      <div class="sb-sect" style="flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:80px;">
+        <div class="sb-label">Files</div>
+        <div class="ftree" id="file-tree" style="flex:1;overflow-y:auto;"></div>
+      </div>
+
+      <div class="sb-sect" style="max-height:150px;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="sb-label">TODOs</div>
+        <div id="todo-ui" style="flex:1;overflow-y:auto;"></div>
+      </div>
+
+      <div class="sb-sect" style="max-height:120px;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="sb-label">Sessions</div>
+        <div id="session-list" style="flex:1;overflow-y:auto;"></div>
+      </div>
+
+      <div class="sb-sect">
+        <div class="sb-label">History</div>
+        <button class="btn sm full" id="undo-btn" style="margin-bottom:5px;">Undo Last Edit</button>
+        <button class="btn sm full" id="rewind-btn" style="margin-bottom:5px;">Rewind Conversation</button>
+        <div id="edit-history" style="max-height:120px;overflow-y:auto;"></div>
+      </div>
+
+      <div class="sb-sect" style="max-height:100px;overflow:hidden;display:flex;flex-direction:column;">
+        <div class="sb-label">Memory</div>
+        <div id="memory-list" style="flex:1;overflow-y:auto;"></div>
+      </div>
+
+      <div class="sb-sect">
+        <div class="sb-label" style="margin-bottom:6px;">Conversations</div>
+        <button class="btn sm full" id="new-chat-btn" style="margin-bottom:5px;">+ New Chat</button>
+        <div class="conv-list" id="conv-list"></div>
+      </div>
+
+      <div class="sb-sect">
+        <div class="sb-label">Settings</div>
+        <div class="inp-grp">
+          <label>Mistral API Key</label>
+          <input type="password" id="api-key" placeholder="sk-...">
+        </div>
+        <div class="inp-grp">
+          <label>Model</label>
+          <select id="model-sel">
+            <option value="mistral-large-latest">Mistral Large</option>
+            <option value="codestral-latest">Codestral</option>
+            <option value="mistral-medium-latest">Mistral Medium</option>
+            <option value="mistral-small-latest">Mistral Small</option>
+            <option value="open-mistral-nemo">Mistral Nemo</option>
+          </select>
+        </div>
+        <div class="inp-grp">
+          <label>Temp</label>
+          <input type="number" id="temp-inp" value="0.7" min="0" max="2" step="0.05">
+        </div>
+        <div class="inp-grp">
+          <label>Max Tok</label>
+          <input type="number" id="maxtok-inp" value="4096" min="256" max="32768" step="256">
+        </div>
+        <button class="btn prim full sm" id="save-settings">Save Settings</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div id="main">
+    <div id="top-bar">
+      <button class="ibtn" id="toggle-sb" title="Toggle sidebar">
+        <svg viewBox="0 0 16 16" fill="none">
+          <rect x="1.5" y="1.5" width="3" height="13" rx="1" fill="currentColor" opacity=".6"/>
+          <path d="M7 4h7M7 8h7M7 12h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <span id="ws-display">No workspace open</span>
+      <div style="flex:1"></div>
+      <span class="top-chip edit" id="mode-chip">Edit</span>
+    </div>
+
+    <div id="chat">
+      <div id="msgs">
+        <div id="welcome">
+          <div class="wlc-logo">ARIA</div>
+          <p class="wlc-sub">Autonomous Reasoning &amp; Implementation Agent.<br>Browser-native AI coding collaborator.</p>
+          <div class="wlc-actions">
+            <button class="act-pill" onclick="document.getElementById('open-folder-btn').click()">Open Folder</button>
+            <button class="act-pill" onclick="import('./js/fs.js').then(m=>m.initIDBSession())">New Session</button>
+            <button class="act-pill" onclick="document.getElementById('prompt-inp').focus()">Chat Without FS</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="status-bar">
+      <span id="sb-path">~</span>
+      <span class="sb-sep">|</span>
+      <span id="sb-branch" class="hide">main</span>
+      <span id="sb-model"></span>
+      <div class="sb-spacer"></div>
+      <div id="ctx-wrap">
+        <span style="color:var(--txt3)">CTX</span>
+        <span id="ctx-pct">0%</span>
+        <div id="ctx-track"><div id="ctx-fill" style="width:0%"></div></div>
+      </div>
+      <span id="mode-badge" class="edit">EDIT</span>
+    </div>
+
+    <div id="input-area">
+      <button class="ibtn" id="attach-btn" title="Attach file(s)">
+        <svg viewBox="0 0 16 16" fill="none">
+          <path d="M13.5 7L7 13.5C5.6 14.9 3.4 14.9 2 13.5C.6 12.1.6 9.9 2 8.5L8.5 2C9.5 1 11.1 1 12 2C13 3 13 4.5 12 5.5L5.8 11.7C5.3 12.2 4.5 12.2 4 11.7C3.5 11.2 3.5 10.4 4 9.9L10 3.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div id="prompt-wrap">
+        <div id="attach-bar"></div>
+        <textarea id="prompt-inp" placeholder="Enter your prompt here... (Shift+Tab to cycle modes)" rows="1"></textarea>
+      </div>
+      <button id="send-btn">SEND&nbsp;&#8629;</button>
+      <input type="file" id="file-input" hidden multiple>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/lucide@latest"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
+
