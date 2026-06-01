@@ -690,15 +690,33 @@ export function renderRewindUI() {
       opt.innerHTML = '<div class="conv-title">' + esc(x.msg.content.slice(0, 80)) + (x.msg.content.length > 80 ? '...' : '') + '</div>' +
         '<div class="conv-meta">Message ' + (i + 1) + '</div>';
       opt.onclick = () => {
-        if (confirm('Rewind to this message? This cannot be undone.')) {
-          // Remove all messages after this point
-          S.msgs = S.msgs.slice(0, x.idx + 1);
-          // Save conversation
-          import('./app.js').then(m => m.saveConv());
-          // Reload conversation
-          loadConv(S.convId);
-          modal.remove();
-          toast('Rewound to message ' + (i + 1));
+        if (confirm('Rewind to this message? This will remove messages after this point and may undo file edits.')) {
+          // Use state.rewindToMessage to get edits that need undoing
+          import('./state.js').then(async m => {
+            const res = m.rewindToMessage(x.idx);
+            if (!res || !res.trimmed) {
+              toast('Rewind failed');
+              return;
+            }
+            const edits = res.editsToUndo || [];
+            if (edits.length) {
+              const { fsWrite } = await import('./fs.js');
+              for (const e of edits) {
+                try {
+                  await fsWrite(e.path, e.before);
+                } catch (err) {
+                  console.error('Failed to undo edit', e, err);
+                }
+              }
+              toast('Reverted ' + edits.length + ' file edit(s) to match rewind point');
+            }
+            // Save conversation
+            import('./app.js').then(m2 => m2.saveConv());
+            // Reload conversation
+            loadConv(S.convId);
+            modal.remove();
+            toast('Rewound to message ' + (i + 1));
+          });
         }
       };
       options.appendChild(opt);

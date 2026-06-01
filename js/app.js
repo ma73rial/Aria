@@ -64,7 +64,7 @@ export async function runAgent(input) {
   addUserMsg(input, S.files);
   S.files = [];
   renderAttachBar();
-  S.msgs.push({ role: 'user', content });
+  S.msgs.push({ role: 'user', content, _ts: Date.now() });
   startTurn();
 
   let turns = 0;
@@ -77,23 +77,33 @@ export async function runAgent(input) {
       const apiMsgs = [{ role: 'system', content: buildSysPrompt() }, ...S.msgs];
 
       let resp;
+      // During streaming we avoid repeatedly parsing partial Markdown.
+      // Show plain text via `textContent` (no innerHTML) and debounce updates.
+      let renderTimer = null;
+      let latestFull = '';
       try {
         resp = await streamChatWithRetry(apiMsgs, TOOLS, {
           onDelta(chunk, full) {
-            // Update the streaming thought block in real-time.
+            // Update the streaming thought block in real-time as plain text.
             if (!currentTurn) return;
+            latestFull = full;
             let last = currentTurn.querySelector('.thought:last-child');
             if (!last) {
-              // Create a new thought block if none exists.
               const b = document.createElement('div');
               b.className = 'thought';
               currentTurn.appendChild(b);
               last = b;
             }
-            last.innerHTML = renderRich(full);
-            highlightAll(last);
+            // Debounce to avoid excessive DOM churn and partial HTML parsing.
+            clearTimeout(renderTimer);
+            renderTimer = setTimeout(() => {
+              // During streaming we only set textContent to avoid malformed HTML.
+              last.textContent = latestFull;
+            }, 150);
           },
         });
+        // Clear any pending streaming render after stream completes.
+        clearTimeout(renderTimer);
       } catch (e) {
         if (e.name === 'AbortError') { closeTurn(); break; }
         addErrBlock('API error: ' + e.message);
@@ -110,6 +120,7 @@ export async function runAgent(input) {
         role: 'assistant',
         content: msg.content || '',
         ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+        _ts: Date.now(),
       });
 
       if (msg.tool_calls?.length) {
@@ -133,6 +144,7 @@ export async function runAgent(input) {
             tool_call_id: tc.id,
             name: tc.function.name,
             content: JSON.stringify(result),
+            _ts: Date.now(),
           });
         }
         continue;
@@ -144,6 +156,9 @@ export async function runAgent(input) {
       if (msg.content?.trim()) {
         const thought = currentTurn?.querySelector('.thought:last-child');
         if (thought) {
+          // Replace streaming plain text with final rendered Markdown.
+          thought.innerHTML = renderRich(msg.content.trim());
+          highlightAll(thought);
           // Restyle the thought as a final block.
           thought.className = 'final';
           // Prepend the green dot.

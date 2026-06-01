@@ -88,9 +88,13 @@ export function openReviewModal() {
   </div>`;
   document.body.appendChild(modal);
 
-  const close = () => { modal.remove(); clearPendingDiffs(); };
-  modal.querySelector('.modal-close').onclick = close;
-  modal.onclick = e => { if (e.target === modal) close(); };
+  // dismiss: just close modal, keep buffer (user might review later)
+  const dismiss = () => { modal.remove(); };
+  // finish: close modal AND clear buffer (user has finished reviewing)
+  const finish = () => { modal.remove(); clearPendingDiffs(); };
+  
+  modal.querySelector('.modal-close').onclick = dismiss;
+  modal.onclick = e => { if (e.target === modal) dismiss(); };
 
   modal.querySelectorAll('.review-file').forEach(file => {
     const id = file.dataset.id;
@@ -106,11 +110,11 @@ export function openReviewModal() {
 
   modal.querySelector('#rv-all-accept').onclick = () => {
     S.pendingDiffs.forEach(d => { if (!d.resolved) resolvePendingDiff(d.id, 'accept'); });
-    close();
+    finish();
   };
   modal.querySelector('#rv-all-reject').onclick = () => {
     S.pendingDiffs.forEach(d => { if (!d.resolved) resolvePendingDiff(d.id, 'reject'); });
-    close();
+    finish();
   };
-  modal.querySelector('#rv-done').onclick = close;
+  modal.querySelector('#rv-done').onclick = finish;
 }

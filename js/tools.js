@@ -84,10 +84,12 @@ function waitForApproval(path, diff, isNew) {
     buttons.append(rejectBtn, acceptBtn);
     widget.append(header, diffView, buttons);
     
-    // Append to the current turn
-    const turn = document.querySelector('.turn:last-child') || document.body;
+    // Append to the current agent turn (where tool outputs live)
+    const turn = document.querySelector('.msg-agent:last-child') 
+              || document.getElementById('msgs') 
+              || document.body;
     turn.appendChild(widget);
-    widget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    widget.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 }
 
@@ -179,7 +181,10 @@ export async function execTool(name, args) {
       
       await fsWrite(args.path, args.content);
       Bus.emit('fs:changed', { path: args.path });
-      recordPendingDiff({ path: args.path, before, after: args.content, diff, isNew });
+      // Only queue for batch review in YOLO mode (edit mode already approved inline)
+      if (S.mode === 'yolo') {
+        recordPendingDiff({ path: args.path, before, after: args.content, diff, isNew });
+      }
       recordEdit(args.path, before, args.content, 'write_file', args);
       return { success: true, path: args.path, diff, isNew, _ui: 'diff',
         message: (before ? 'Wrote ' : 'Created ') + args.path + ` (+${diff.stats.add}, -${diff.stats.del})` };
@@ -216,7 +221,10 @@ export async function execTool(name, args) {
       
       await fsWrite(args.path, next);
       Bus.emit('fs:changed', { path: args.path });
-      recordPendingDiff({ path: args.path, before: content, after: next, diff, isNew });
+      // Only queue for batch review in YOLO mode (edit mode already approved inline)
+      if (S.mode === 'yolo') {
+        recordPendingDiff({ path: args.path, before: content, after: next, diff, isNew });
+      }
       recordEdit(args.path, content, next, 'edit_file', args);
       return { success: true, path: args.path, diff, isNew, _ui: 'diff',
         message: (isNew ? 'Created ' : 'Edited ') + args.path + ` (+${diff.stats.add}, -${diff.stats.del})` };
@@ -297,7 +305,13 @@ export async function execTool(name, args) {
         typeof x === 'object' ? JSON.stringify(x, null, 2) : String(x)).join(' '));
       let out = '', err = '';
       try {
-        const v = eval(args.code);
+        // Use Function constructor to isolate scope (prevents access to S, fsWrite, localStorage, etc.)
+        const fn = new Function('console', `
+          "use strict";
+          ${args.code}
+        `);
+        const v = fn({ log: (...a) => logs.push(a.map(x =>
+          typeof x === 'object' ? JSON.stringify(x, null, 2) : String(x)).join(' ')) });
         if (v !== undefined) logs.push(String(v));
       } catch (e) { err = e.message; }
       finally { console.log = orig; }
@@ -374,11 +388,23 @@ raw.textContent=${JSON.stringify(args.content)};window.print();<\/script></body>
     }
 
     case 'think_deeper': {
-      const r = await apiChat([{
+      // Emit start event so UI can create a dedicated block for streaming
+      Bus.emit('turn:think_deeper_start', args.problem);
+
+      const sys = {
         role: 'user',
         content: `Think deeply about this problem and provide thorough analysis:\n\n**Problem:** ${args.problem}${args.context ? '\n\n**Context:** ' + args.context : ''}\n\nProvide clear analysis and concrete next steps.`
-      }]);
-      const analysis = r.choices?.[0]?.message?.content || 'No analysis generated';
+      };
+
+      let accumulated = '';
+      const resp = await streamChatWithRetry([sys], null, {
+        onDelta(chunk, full) {
+          accumulated = full;
+          Bus.emit('turn:think_deeper_delta', full);
+        }
+      });
+
+      const analysis = resp?.content || accumulated || 'No analysis generated';
       return { success: true, analysis, _ui: 'think_deeper' };
     }
 

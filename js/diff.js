@@ -16,7 +16,7 @@ function myersDiff(a, b) {
 
   // Find shortest edit script using Myers algorithm
   const MAX = N + M;
-  const V = new Array(2 * MAX + 1);
+  let V = new Array(2 * MAX + 1);
   const trace = [];
   
   V[MAX + 1] = 0;
@@ -45,7 +45,7 @@ function myersDiff(a, b) {
       }
     }
     trace.push(Vnew);
-    V.set(Vnew);
+    V = Vnew;
   }
   
   return backtrack(trace, a, b, MAX);

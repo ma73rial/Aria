@@ -136,8 +136,18 @@ export function getEditHistory() {
 
 export function rewindToMessage(messageIndex) {
   if (messageIndex < 0 || messageIndex >= S.msgs.length) return false;
-  // Keep messages up to and including the selected index
+  // Determine cutoff timestamp (messages without timestamps default to 0)
+  const cutoffTs = S.msgs[messageIndex]?._ts || 0;
+
+  // Find edits that happened after the cutoff — these need undoing
+  const editsToUndo = S.editHistory.filter(e => e.timestamp > cutoffTs).map(e => ({ ...e })).reverse();
+
+  // Trim messages to the selected point
   S.msgs = S.msgs.slice(0, messageIndex + 1);
+
+  // Trim editHistory to only keep edits up to the cutoff
+  S.editHistory = S.editHistory.filter(e => e.timestamp <= cutoffTs);
   saveState();
-  return true;
+
+  return { trimmed: true, editsToUndo };
 }
