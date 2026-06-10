@@ -4,6 +4,7 @@
 //   - Exponential-backoff retry on 429 / 5xx
 //   - Automatic model step-down (large → medium → small)
 //   - Abort signal plumbed through
+//   - Proxy support (routes through local backend by default)
 // ─────────────────────────────────────────────────────────────
 
 import { S, Live, MODEL_CTX, MODEL_FALLBACK } from './state.js';
@@ -12,6 +13,16 @@ import { est, sleep, Bus, toast } from './utils.js';
 const MAX_RETRIES = 5;
 const BASE_BACKOFF = 1000;
 const MAX_BACKOFF  = 30000;
+
+/**
+ * API base URL.  When the server is running locally, requests
+ * are proxied through it so the Mistral Python SDK handles the
+ * request formatting (avoiding 422 errors from schema changes).
+ * Uses same-origin so the server serves both frontend and API
+ * at the same host.  Change to 'https://api.mistral.ai/v1' to
+ * call Mistral directly without the proxy.
+ */
+const API_BASE = '/v1';
 
 /**
  * Stream a chat completion.
@@ -39,7 +50,7 @@ export async function streamChat(messages, tools = null, opts = {}) {
     ? combineSignals([signal, Live.abortCtrl.signal])
     : Live.abortCtrl.signal;
 
-  const r = await fetch('https://api.mistral.ai/v1/chat/completions', {
+  const r = await fetch(API_BASE + '/chat/completions', {
     method: 'POST',
     signal: finalSignal,
     headers: {
@@ -84,7 +95,7 @@ export async function streamChat(messages, tools = null, opts = {}) {
         if (parsed.usage) usage = parsed.usage;
         const delta = parsed.choices?.[0]?.delta;
         if (!delta) continue;
-        if (delta.content) {
+        if (typeof delta.content === 'string') {
           content += delta.content;
           onDelta?.(delta.content, content);
         }
@@ -129,7 +140,7 @@ export async function apiChat(messages, tools = null, opts = {}) {
   const body = { model, messages, temperature, max_tokens };
   if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
 
-  const r = await fetch('https://api.mistral.ai/v1/chat/completions', {
+  const r = await fetch(API_BASE + '/chat/completions', {
     method: 'POST',
     signal: finalSignal,
     headers: {

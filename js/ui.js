@@ -154,7 +154,7 @@ export function renderToolResult(name, result) {
     };
     lb.textContent = result.mode === 'open_folder' ? '\ud83d\udcc1 Open Folder'
       : result.mode === 'new_idb' ? '\ud83d\udfc4 New IDB Session'
-      : 'Switch to ' + result.mode.toUpperCase();
+        : 'Switch to ' + result.mode.toUpperCase();
     const disable = () => { lb.disabled = true; lb.style.opacity = '.4'; sb.disabled = true; sb.style.opacity = '.4'; };
     lb.onclick = () => { modeActions[result.mode]?.(); disable(); };
     sb.onclick = disable;
@@ -363,8 +363,6 @@ export function updateStatusBar() {
   if (badge) { badge.textContent = S.mode.toUpperCase(); badge.className = S.mode; }
   const chip = document.getElementById('mode-chip');
   if (chip) { chip.textContent = S.mode.charAt(0).toUpperCase() + S.mode.slice(1); chip.className = 'top-chip ' + S.mode; }
-  const modelEl = document.getElementById('sb-model');
-  if (modelEl) modelEl.textContent = S.model;
 }
 
 export function updateCtxBar(pct) {
@@ -376,6 +374,7 @@ export function updateCtxBar(pct) {
     fillEl.style.width = Math.min(S.ctxUsage * 100, 100) + '%';
     fillEl.style.backgroundPosition = (S.ctxUsage * 100) + '% center';
   }
+  updateFooterMeta();
 }
 
 export function setMode(mode) {
@@ -395,6 +394,39 @@ export function setInput(enabled) {
   else { btn.innerHTML = '<div class="spin"></div>'; btn.className = 'stop'; btn.disabled = false; }
 }
 
+// --- Accordion toggles ---
+export function initAccordions() {
+  document.querySelectorAll('.sb-acc-header').forEach(hdr => {
+    hdr.onclick = () => {
+      const key = hdr.dataset.acc;
+      const body = document.querySelector(`.sb-acc-body[data-acc="${key}"]`);
+      if (!body) return;
+      const isOpen = body.classList.toggle('open');
+      hdr.classList.toggle('open', isOpen);
+      // Remember state
+      try {
+        const states = JSON.parse(localStorage.getItem('aria_accords') || '{}');
+        states[key] = isOpen;
+        localStorage.setItem('aria_accords', JSON.stringify(states));
+      } catch { }
+    };
+  });
+}
+
+// Restore accordion states from localStorage
+export function restoreAccordions() {
+  try {
+    const states = JSON.parse(localStorage.getItem('aria_accords') || '{}');
+    Object.entries(states).forEach(([key, isOpen]) => {
+      const hdr = document.querySelector(`.sb-acc-header[data-acc="${key}"]`);
+      const body = document.querySelector(`.sb-acc-body[data-acc="${key}"]`);
+      if (hdr && body && isOpen) {
+        hdr.classList.add('open');
+        body.classList.add('open');
+      }
+    });
+  } catch { }
+}
 
 
 // --- File tree ---------------------------------------------
@@ -592,7 +624,7 @@ export function renderAttachBar() {
   });
 }
 
-window.rmFile = function(i) { S.files.splice(i, 1); renderAttachBar(); };
+window.rmFile = function (i) { S.files.splice(i, 1); renderAttachBar(); };
 
 // --- Edit history and undo ----------------------------------
 
@@ -604,19 +636,19 @@ export function renderEditHistory() {
     el.innerHTML = '<div style="color:var(--txt3);font-size:10px;padding:3px">No edit history</div>';
     return;
   }
-  
+
   // Show last 10 edits
   const recent = S.editHistory.slice(-10).reverse();
   for (const edit of recent) {
     const item = document.createElement('div');
     item.className = 'todo-item';
     item.style.cssText = 'gap:6px;';
-    
+
     const info = document.createElement('div');
     info.style.cssText = 'flex:1;min-width:0;';
     info.innerHTML = '<div class="todo-txt" style="font-weight:600;color:var(--teal)">' + esc(edit.path) + '</div>' +
       '<div class="todo-txt" style="opacity:0.6">' + edit.tool + ' at ' + new Date(edit.ts).toLocaleTimeString() + '</div>';
-    
+
     const undoBtn = document.createElement('button');
     undoBtn.className = 'btn sm';
     undoBtn.innerHTML = ICONS.undo(10);
@@ -638,7 +670,7 @@ export function renderEditHistory() {
         }
       }
     };
-    
+
     item.append(info, undoBtn);
     el.appendChild(item);
   }
@@ -649,23 +681,23 @@ export function renderEditHistory() {
 export function renderRewindUI() {
   const el = document.getElementById('rewind-btn');
   if (!el) return;
-  
+
   el.onclick = () => {
     if (!S.msgs.length) {
       toast('No messages to rewind');
       return;
     }
-    
+
     // Find user messages to rewind to
     const userMsgs = S.msgs
       .map((m, i) => ({ msg: m, idx: i }))
       .filter(x => x.msg.role === 'user');
-    
+
     if (userMsgs.length < 2) {
       toast('Need at least 2 user messages to rewind');
       return;
     }
-    
+
     // Create modal to select rewind point
     const modal = document.createElement('div');
     modal.className = 'modal-backdrop';
@@ -681,7 +713,7 @@ export function renderRewindUI() {
         </div>
       </div>
     `;
-    
+
     const options = modal.querySelector('.rewind-options');
     userMsgs.slice(0, -1).forEach((x, i) => {
       const opt = document.createElement('div');
@@ -721,14 +753,49 @@ export function renderRewindUI() {
       };
       options.appendChild(opt);
     });
-    
+
     modal.querySelector('.modal-close').onclick = () => modal.remove();
     modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
-    
+
     document.body.appendChild(modal);
   };
-}
 
+  // --- Session name modal -----------------------------------
+  // Returns a Promise that resolves to the entered session name (string) or undefined if cancelled.
+ 
+}
+ export async function showSessionNameModal() {
+    return new Promise((resolve) => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-backdrop';
+      modal.innerHTML = `
+      <div class="modal">
+        <div class="modal-hd">
+          <span>New IDB Session</span>
+          <button class="modal-close">${ICONS.x(16)}</button>
+        </div>
+        <div class="modal-body">
+          <p style="color:var(--txt2);margin-bottom:8px;">Enter a session name (optional):</p>
+          <input type="text" id="session-name-input" placeholder="Session name" style="width:100%;padding:4px;margin-bottom:8px;" />
+          <div style="text-align:right;">
+            <button class="btn sm" id="session-ok">OK</button>
+            <button class="btn sm" id="session-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>`;
+
+      const okBtn = modal.querySelector('#session-ok');
+      const cancelBtn = modal.querySelector('#session-cancel');
+      const input = modal.querySelector('#session-name-input');
+      const close = () => { modal.remove(); resolve(undefined); };
+      okBtn.onclick = () => { modal.remove(); resolve(input.value.trim() || undefined); };
+      cancelBtn.onclick = close;
+      modal.querySelector('.modal-close').onclick = close;
+      modal.onclick = (e) => { if (e.target === modal) close(); };
+      document.body.appendChild(modal);
+      input.focus();
+    });
+  }
 export function updateUI() {
   updateStatusBar();
   renderTodos();
@@ -738,33 +805,107 @@ export function updateUI() {
   renderEditHistory();
   updateCtxBar();
   updateFileTree();
+  restoreAccordions();
+  hideEmptySections();
+  updateFooterMeta();
+}
+
+// Hide sidebar sections that have no data
+export function hideEmptySections() {
+  // Files: hide when no workspace
+  const filesSec = document.getElementById('files-section');
+  if (filesSec) filesSec.style.display = S.fsMode ? 'flex' : 'none';
+
+  // TODOs: hide when empty
+  const todosSec = document.getElementById('todos-section');
+  if (todosSec) todosSec.style.display = S.todos.length ? 'flex' : 'none';
+
+  // Sessions: hide when empty
+  const sessSec = document.getElementById('sessions-section');
+  if (sessSec) sessSec.style.display = S.sessions.length ? 'flex' : 'none';
+
+  // Memory: hide when empty
+  const memSec = document.getElementById('memory-section');
+  if (memSec) memSec.style.display = S.memory.length ? 'flex' : 'none';
+}
+
+// Update the footer model/ctx info
+export function updateFooterMeta() {
+  const modelEl = document.getElementById('sb-footer-model');
+  if (modelEl) modelEl.textContent = S.model;
+  const ctxEl = document.getElementById('sb-footer-ctx');
+  if (ctxEl) ctxEl.textContent = 'CTX ' + (S.ctxUsage * 100).toFixed(1) + '%';
 }
 
 function loadConv(id) {
-  const c = S.convs.find(function(x) { return x.id === id; });
+  const c = S.convs.find(function (x) { return x.id === id; });
   if (!c) return;
   S.convId = id;
   S.msgs = c.msgs;
   const msgs = document.getElementById('msgs');
   msgs.innerHTML = '';
-  
-  // Render all messages from history
+
+  // Walk the message list and group assistant turns with their tool results.
+  // An "agent turn" is: one assistant message + zero-or-more tool pairs + optional final assistant text.
+  let agentTurn = null; // current .msg-agent div being built
+
+  const flushTurn = () => {
+    if (agentTurn) { msgs.appendChild(agentTurn); agentTurn = null; }
+  };
+
+  // Build a map of tool_call_id → tool result message for quick lookup
+  const toolResults = {};
+  for (const m of S.msgs) {
+    if (m.role === 'tool') toolResults[m.tool_call_id] = m;
+  }
+
   for (const m of S.msgs) {
     if (m.role === 'user') {
+      flushTurn();
       addUserMsg(m.content, []);
-    } else if (m.role === 'assistant' && m.content) {
-      // Create a message container for assistant messages
-      const turn = document.createElement('div');
-      turn.className = 'msg-agent';
-      const content = document.createElement('div');
-      content.className = 'final';
-      content.innerHTML = '<div class="fdot"></div><div class="md-wrap">' + renderRich(m.content) + '</div>';
-      highlightAll(content);
-      turn.appendChild(content);
-      msgs.appendChild(turn);
+    } else if (m.role === 'assistant') {
+      // Each assistant message starts a new agent turn (or continues one with tool_calls)
+      if (!agentTurn) {
+        agentTurn = document.createElement('div');
+        agentTurn.className = 'msg-agent';
+      }
+
+      // If assistant had tool_calls, render each as a finished tool row
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments); } catch {}
+          // Build a static (already-finished) tool row
+          const el = document.createElement('div');
+          el.className = 'tool-act';
+          const dot = document.createElement('div');
+          dot.className = 'tdot ok';
+          const lbl = document.createElement('div');
+          lbl.className = 'tlabel';
+          lbl.innerHTML = toolLabel(tc.function.name, args);
+          el.append(dot, lbl);
+          agentTurn.appendChild(el);
+        }
+      }
+
+      // If assistant also has text content, render it as a final block
+      if (m.content?.trim()) {
+        const el = document.createElement('div');
+        el.className = 'final';
+        el.innerHTML = '<div class="fdot"></div><div class="final-content">' + renderRich(m.content.trim()) + '</div>';
+        highlightAll(el);
+        agentTurn.appendChild(el);
+        // Flush after a text-bearing assistant turn (it's a completed turn)
+        flushTurn();
+      }
+      // If assistant has only tool_calls (no text), don't flush — wait for more messages
+    } else if (m.role === 'tool') {
+      // Tool result messages are paired with their assistant message above — already rendered
+      // Nothing extra to do; skip.
     }
   }
-  
+  flushTurn();
+
   scrollBot();
   updateUI();
   toast('Loaded conversation');

@@ -37,10 +37,14 @@ export async function afterFsInit(type, name) {
 export async function runAgent(input) {
   if (S.running) return;
   if (!S.key) {
-    toast('No API key -- open Settings and save your key.');
-    const sb = document.getElementById('sidebar');
-    if (sb) sb.classList.remove('hide');
-    document.getElementById('main')?.classList.add('sb-open');
+    // Show the setup modal so the user can enter a key
+    const setupModal = document.getElementById('setup-modal');
+    if (setupModal) {
+      setupModal.classList.remove('hidden');
+      setTimeout(() => document.getElementById('setup-key')?.focus(), 100);
+    } else {
+      toast('No API key -- open Settings and save your key.');
+    }
     return;
   }
   S.running = true;
@@ -130,8 +134,14 @@ export async function runAgent(input) {
           const row = addToolRow(tc.function.name, args);
           let result;
           try {
+            // Tools that require user input suspend the run-loop while waiting.
+            // We re-enable the textarea (so the user can type an answer) but
+            // keep S.running = true so no second runAgent() can be launched.
+            const isUserInputTool = tc.function.name === 'clarify' || tc.function.name === 'simple_question';
+            if (isUserInputTool) setInput(true);
             const toolResult = execTool(tc.function.name, args);
             result = toolResult instanceof Promise ? await toolResult : toolResult;
+            if (isUserInputTool) setInput(false);
             finishToolRow(row, result.success !== false);
             renderToolResult(tc.function.name, result);
           } catch (e) {

@@ -24,84 +24,115 @@
     </div>
     <div class="sb-body">
 
+      <!-- Mode toggle -->
       <div class="sb-sect">
         <div class="sb-label">Mode</div>
-        <div class="mode-row">
+        <div class="mode-toggle">
           <button class="mode-btn plan" data-mode="plan">Plan</button>
-          <button class="mode-btn on" data-mode="edit">Edit</button>
+          <button class="mode-btn edit" data-mode="edit">Edit</button>
           <button class="mode-btn yolo" data-mode="yolo">YOLO</button>
         </div>
       </div>
 
+      <!-- Workspace info -->
       <div class="sb-sect">
         <div class="sb-label">Workspace</div>
-        <div class="btn-row" style="margin-bottom:5px;">
-          <button class="btn sm" id="open-folder-btn" style="flex:1;">Open Folder</button>
-          <button class="btn sm" id="new-idb-btn" style="flex:1;">New Session</button>
-        </div>
-        <div id="fs-info" style="font-size:10px;color:var(--txt3);font-family:var(--mono);min-height:14px;"></div>
+        <div id="fs-info" style="font-size:10px;color:var(--txt3);font-family:var(--mono);min-height:14px;margin-top:4px;"></div>
       </div>
 
+      <!-- File tree -->
       <div class="sb-sect" style="flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:80px;">
         <div class="sb-label">Files</div>
         <div class="ftree" id="file-tree" style="flex:1;overflow-y:auto;"></div>
       </div>
 
-      <div class="sb-sect" style="max-height:150px;overflow:hidden;display:flex;flex-direction:column;">
-        <div class="sb-label">TODOs</div>
-        <div id="todo-ui" style="flex:1;overflow-y:auto;"></div>
+      <!-- TODOs accordion -->
+      <div class="sb-accordion">
+        <div class="sb-acc-header" data-acc="todos">
+          <span class="sb-acc-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          </span>
+          <span>TODOs</span>
+          <span class="sb-acc-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </div>
+        <div class="sb-acc-body" data-acc="todos">
+          <div id="todo-ui"></div>
+        </div>
       </div>
 
-      <div class="sb-sect" style="max-height:120px;overflow:hidden;display:flex;flex-direction:column;">
-        <div class="sb-label">Sessions</div>
-        <div id="session-list" style="flex:1;overflow-y:auto;"></div>
+      <!-- Sessions accordion -->
+      <div class="sb-accordion">
+        <div class="sb-acc-header" data-acc="sessions">
+          <span class="sb-acc-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          </span>
+          <span>Sessions</span>
+          <span class="sb-acc-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </div>
+        <div class="sb-acc-body" data-acc="sessions">
+          <div id="session-list"></div>
+        </div>
       </div>
 
-      <div class="sb-sect">
-        <div class="sb-label">History</div>
-        <button class="btn sm full" id="undo-btn" style="margin-bottom:5px;">Undo Last Edit</button>
-        <button class="btn sm full" id="rewind-btn" style="margin-bottom:5px;">Rewind Conversation</button>
-        <div id="edit-history" style="max-height:120px;overflow-y:auto;"></div>
+      <!-- History accordion -->
+      <div class="sb-accordion">
+        <div class="sb-acc-header" data-acc="history">
+          <span class="sb-acc-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </span>
+          <span>History</span>
+          <span class="sb-acc-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </div>
+        <div class="sb-acc-body" data-acc="history">
+          <button class="btn sm full" id="undo-btn" style="margin-bottom:5px;">Undo Last Edit</button>
+          <button class="btn sm full" id="rewind-btn" style="margin-bottom:5px;">Rewind Conversation</button>
+          <div id="edit-history"></div>
+        </div>
       </div>
 
-      <div class="sb-sect" style="max-height:100px;overflow:hidden;display:flex;flex-direction:column;">
-        <div class="sb-label">Memory</div>
-        <div id="memory-list" style="flex:1;overflow-y:auto;"></div>
+      <!-- Memory accordion -->
+      <div class="sb-accordion">
+        <div class="sb-acc-header" data-acc="memory">
+          <span class="sb-acc-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+          </span>
+          <span>Memory</span>
+          <span class="sb-acc-arrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </div>
+        <div class="sb-acc-body" data-acc="memory">
+          <div id="memory-list"></div>
+        </div>
       </div>
 
+      <!-- Conversations -->
       <div class="sb-sect">
         <div class="sb-label" style="margin-bottom:6px;">Conversations</div>
         <button class="btn sm full" id="new-chat-btn" style="margin-bottom:5px;">+ New Chat</button>
         <div class="conv-list" id="conv-list"></div>
       </div>
 
-      <div class="sb-sect">
-        <div class="sb-label">Settings</div>
-        <div class="inp-grp">
-          <label>Mistral API Key</label>
-          <input type="password" id="api-key" placeholder="sk-...">
-        </div>
-        <div class="inp-grp">
-          <label>Model</label>
-          <select id="model-sel">
-            <option value="mistral-large-latest">Mistral Large</option>
-            <option value="codestral-latest">Codestral</option>
-            <option value="mistral-medium-latest">Mistral Medium</option>
-            <option value="mistral-small-latest">Mistral Small</option>
-            <option value="open-mistral-nemo">Mistral Nemo</option>
-          </select>
-        </div>
-        <div class="inp-grp">
-          <label>Temp</label>
-          <input type="number" id="temp-inp" value="0.7" min="0" max="2" step="0.05">
-        </div>
-        <div class="inp-grp">
-          <label>Max Tok</label>
-          <input type="number" id="maxtok-inp" value="4096" min="256" max="32768" step="256">
-        </div>
-        <button class="btn prim full sm" id="save-settings">Save Settings</button>
-      </div>
+    </div>
 
+    <!-- Sidebar Footer -->
+    <div class="sb-footer">
+      <div class="sb-footer-model" id="sb-footer-model"></div>
+      <span class="sb-footer-sep">|</span>
+      <div class="sb-footer-ctx" id="sb-footer-ctx">CTX 0%</div>
+      <div style="flex:1"></div>
+      <button class="ibtn" id="settings-btn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -116,7 +147,6 @@
       </button>
       <span id="ws-display">No workspace open</span>
       <div style="flex:1"></div>
-      <span class="top-chip edit" id="mode-chip">Edit</span>
     </div>
 
     <div id="chat">
@@ -125,7 +155,7 @@
           <div class="wlc-logo">ARIA</div>
           <p class="wlc-sub">Autonomous Reasoning &amp; Implementation Agent.<br>Browser-native AI coding collaborator.</p>
           <div class="wlc-actions">
-            <button class="act-pill" onclick="document.getElementById('open-folder-btn').click()">Open Folder</button>
+            <button class="act-pill primary" onclick="document.getElementById('open-folder-btn').click()">Open Workspace</button>
             <button class="act-pill" onclick="import('./js/fs.js').then(m=>m.initIDBSession())">New Session</button>
             <button class="act-pill" onclick="document.getElementById('prompt-inp').focus()">Chat Without FS</button>
           </div>
@@ -155,7 +185,7 @@
       </button>
       <div id="prompt-wrap">
         <div id="attach-bar"></div>
-        <textarea id="prompt-inp" placeholder="Enter your prompt here... (Shift+Tab to cycle modes)" rows="1"></textarea>
+        <textarea id="prompt-inp" placeholder="Ask away..." rows="1"></textarea>
       </div>
       <button id="send-btn">SEND&nbsp;&#8629;</button>
       <input type="file" id="file-input" hidden multiple>
@@ -165,8 +195,64 @@
 
 <div id="toast"></div>
 
+<!-- Hidden action triggers (referenced by welcome screen and events.js) -->
+<button id="open-folder-btn" hidden></button>
+<button id="new-idb-btn" hidden></button>
+
+<!-- Settings Modal -->
+<div id="settings-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <div class="modal-hd">
+      <span>Settings</span>
+      <button class="modal-close" id="settings-modal-close">
+        <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+          <path d="M2 2l12 12M14 2L2 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="inp-grp">
+        <label>Mistral API Key</label>
+        <div style="position:relative;">
+          <input type="password" id="api-key" placeholder="sk-..." style="width:100%;padding-right:30px;">
+          <button class="setup-eye" id="settings-eye" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);">
+            <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+              <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3"/>
+              <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
+            </svg>
+          </button>
+        </div>
+        <div id="key-status" style="font-size:10px;color:var(--txt3);margin-top:4px;"></div>
+      </div>
+      <div class="inp-row">
+        <div class="inp-grp" style="flex:1;">
+          <label>Model</label>
+          <select id="model-sel" style="width:100%;">
+            <option value="mistral-large-latest">Mistral Large</option>
+            <option value="codestral-latest">Codestral</option>
+            <option value="mistral-medium-latest">Mistral Medium</option>
+            <option value="mistral-small-latest">Mistral Small</option>
+            <option value="open-mistral-nemo">Mistral Nemo</option>
+          </select>
+        </div>
+        <div class="inp-grp" style="flex:1;">
+          <label>Temp</label>
+          <input type="number" id="temp-inp" value="0.7" min="0" max="2" step="0.05" style="width:100%;">
+        </div>
+      </div>
+      <div class="inp-grp">
+        <label>Max Tokens</label>
+        <input type="number" id="maxtok-inp" value="4096" min="256" max="32768" step="256" style="width:100%;">
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" id="settings-modal-cancel">Cancel</button>
+      <button class="btn prim" id="settings-modal-save">Save Settings</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/lucide@latest"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
-

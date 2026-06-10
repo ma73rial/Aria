@@ -23,6 +23,9 @@ export const S = {
   convs: [],           // [{id, title, msgs, created, modified}]
   // Edit history (for undo)
   editHistory: [],     // [{timestamp, path, before, after, toolName, args}]
+  // Todos & memory (loaded from localStorage)
+  todos: [],
+  memory: [],
   // Per-turn working state
   running: false,
   ctxUsage: 0,
