@@ -3,3 +3,10 @@ api.key
 overflow-fix.css.bak
 test-module.html
 server/__pycache__/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
