@@ -1,84 +1,139 @@
-# Aria
+# ARIA
 
-Aria is a web-based interactive tool, likely designed to facilitate interactions with AI models, manage application state, and provide a rich user interface for tasks such as code review, artifact management, and system prompting. It leverages client-side JavaScript for dynamic functionality and a clean CSS for styling.
+**Autonomous Reasoning & Implementation Agent** — a browser-native AI coding collaborator powered by the Mistral API.
 
-## Features (Inferred)
+ARIA runs entirely in the browser. No backend, no build step, no install. Open a folder or start a virtual session and you have a pair programmer with full read/write access to your code.
 
-*   **API Interaction:** Seamless communication with backend services or AI models.
-*   **User Interface:** Dynamic and responsive UI built with modular components.
-*   **State Management:** Efficient handling of application state for a smooth user experience.
-*   **File System Operations:** Potentially client-side file handling or interaction with local storage.
-*   **Markdown Support:** Rendering and interaction with Markdown content.
-*   **Code Review/Diffing:** Tools for comparing and reviewing content.
-*   **Subagent Integration:** Possible support for modular sub-agents or specialized functionalities.
-*   **System Prompting:** Features related to sending prompts or instructions to a system.
+---
 
-## Technologies Used (Inferred)
+## What it does
 
-*   HTML5
-*   CSS3
-*   JavaScript (ES6+)
+ARIA is a tool-calling agent that can read, write, and edit files; run JavaScript; fetch URLs; manage todos and memory across sessions; spawn subagents for isolated subtasks; and ask clarifying questions when it genuinely needs them. It operates in three modes that control how autonomously it acts:
 
-## Getting Started
+| Mode | Behaviour |
+|------|-----------|
+| **Plan** | Read-only analysis. Maps the codebase, identifies problems, produces a concrete implementation plan. No writes. |
+| **Edit** | Collaborative pair programming. Every file change is shown as a diff and requires approval before being applied. |
+| **YOLO** | Autonomous execution. Chains reads, writes, and edits without interruption. Diffs auto-accept after 5 seconds. Best for large refactors or feature work with clear requirements. |
 
-To run this project, you'll need a web server to serve the static files. You can use any static web server. Here are a few options:
+---
 
-### Using Python's Simple HTTP Server
+## Getting started
 
-If you have Python installed, you can quickly start a local server:
+NEW: Aria got a backend. Start with:
+```bash
+# Python 
+python server.py
+```
 
-1.  Navigate to the project root directory in your terminal:
-    ```bash
-    cd /Users/maximilianpezzullo/aria
-    ```
-2.  Run the Python HTTP server:
-    ```bash
-    python -m http.server 8000
-    # Or for Python 2:
-    # python -m SimpleHTTPServer 8000
-    ```
-3.  Open your web browser and go to `http://localhost:8000`.
+Then open `http://localhost:8000`, enter your Mistral API key when prompted, and either:
 
-### Using `serve` (Node.js)
+- **Open Workspace** — picks a local folder via the File System Access API (Chrome/Edge)
+- **New Session** — creates an in-browser virtual filesystem backed by IndexedDB (works everywhere)
+- **Chat Without FS** — chat only, no file access
 
-If you have Node.js installed, you can use the `serve` package:
+Your API key is stored in `api.key` and never leaves the server.
 
-1.  Install `serve` globally (if you haven't already):
-    ```bash
-    npm install -g serve
-    ```
-2.  Navigate to the project root directory:
-    ```bash
-    cd /Users/maximilianpezzullo/aria
-    ```
-3.  Run `serve`:
-    ```bash
-    serve .
-    ```
-4.  Open your web browser and go to the address provided by `serve` (e.g., `http://localhost:3000`).
+---
 
-## Project Structure
+## Browser compatibility
+
+| Feature | Chrome/Edge | Firefox | Safari |
+|---------|-------------|---------|--------|
+| Full functionality | ✅ | ⚠️ no File System Access API | ⚠️ no File System Access API |
+| IDB sessions | ✅ | ✅ | ✅ |
+| Local folder access | ✅ | ❌ | ❌ |
+
+Local folder access (`Open Workspace`) requires the [File System Access API](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API), which is Chrome/Edge only. IDB sessions work in all modern browsers.
+
+---
+
+## Architecture
 
 ```
-.
-├── index.html
-├── styles.css
-└── js/
-    ├── api.js
-    ├── app.js
-    ├── artifacts.js
-    ├── diff.js
-    ├── events.js
-    ├── fs.js
-    ├── icons.js
-    ├── markdown.js
-    ├── review.js
-    ├── state.js
-    ├── subagents.js
-    ├── systemPrompt.js
-    ├── tools-schema.js
-    ├── tools.js
-    ├── ui.js
-    ├── utils.js
-    └── widgets.js
+index.html          Entry point and HTML structure
+styles.css          Single stylesheet — CSS custom properties throughout
+
+js/
+├── app.js          Boot, agent loop, context compression
+├── api.js          Mistral streaming API client with retry logic
+├── tools.js        Tool executor — all 25+ tool implementations
+├── tools-schema.js Tool definitions passed to the API
+├── systemPrompt.js System prompt builder (mode-aware, session-aware)
+├── state.js        Application state, persistence (localStorage), undo/rewind
+├── ui.js           All DOM rendering — messages, diffs, accordions, modals
+├── events.js       Event wiring — keyboard shortcuts, sidebar, settings
+├── fs.js           Filesystem abstraction over OPFS/IDB and File System Access API
+├── diff.js         Diff computation and hunk generation
+├── review.js       Diff review modal — per-file accept/reject
+├── markdown.js     Markdown rendering (marked + highlight.js)
+├── icons.js        Inline SVG icon system
+├── artifacts.js    HTML/code/markdown artifact renderer
+├── subagents.js    Subagent spawning and result handling
+├── widgets.js      Clarify and simple_question interactive widgets
+└── utils.js        Bus (event emitter), toast, escape, scroll helpers
 ```
+
+### How the agent loop works
+
+1. User sends a message → `runAgent()` in `app.js`
+2. Message history + system prompt → Mistral streaming API
+3. Model returns text (streamed live) and/or tool calls
+4. Each tool call is dispatched to `execTool()` in `tools.js`
+5. Tool results are pushed back into the message history
+6. Loop continues until the model returns a response with no tool calls
+7. Conversation is saved to `localStorage`
+
+Clarify/simple_question tools suspend the loop and re-enable the input so the user can answer inline — `S.running` stays `true` throughout so no second agent run can be triggered.
+
+### Filesystem abstraction
+
+ARIA presents a unified path API over two backends:
+
+- **Machine** (`fsMode: 'machine'`) — wraps the browser's File System Access API. Paths are real filesystem paths. Requires user permission grant per folder.
+- **IDB** (`fsMode: 'idb'`) — a virtual filesystem stored in IndexedDB under named sessions. Paths are prefixed `idb://session-name/`. Fully portable, no permissions needed.
+
+`fs.js` exports `fsRead`, `fsWrite`, `fsList`, `fsMkdir`, `fsDelete`, `fsRename` — the rest of the codebase uses these exclusively and never touches the backends directly.
+
+---
+
+## Tools
+
+The agent has access to these tools:
+
+**Filesystem** — `read_file`, `read_file_range`, `read_many_files`, `write_file`, `edit_file`, `delete_file`, `rename_file`, `make_directory`, `list_directory`
+
+**Workspace** — `init_filesystem`, `switch_workspace`, `list_workspaces`, `delete_workspace`
+
+**Memory & todos** — `save_to_memory`, `add_todo`, `complete_todo`, `list_todos`
+
+**Output** — `display_markdown`, `display_html`, `create_artifact`, `make_pdf`
+
+**Execution** — `run_javascript`, `fetch_request`, `git_status`
+
+**Agent** — `think_deeper`, `clarify`, `simple_question`, `spawn_subagent`, `suggest_mode`
+
+**Utility** — `date_now`, `search_conversations`
+
+---
+
+## Settings
+
+All settings live in the gear icon at the bottom of the sidebar:
+
+- **Mistral API Key** — validated against the API on save
+- **Model** — Mistral Large, Codestral, Mistral Medium, Mistral Small, Mistral Nemo
+- **Temperature** — default 0.7
+- **Max Tokens** — default 4096
+
+---
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | New line in message |
+| `Cmd/Ctrl+K` | Focus prompt |
+| `Cmd/Ctrl+\` | Toggle sidebar |
+| `Cmd/Ctrl+M` | Cycle modes (Plan → Edit → YOLO) |
