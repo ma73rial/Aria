@@ -7,12 +7,15 @@
 //   - Proxy support (routes through local backend by default)
 // ─────────────────────────────────────────────────────────────
 
-import { S, Live, MODEL_CTX, MODEL_FALLBACK } from './state.js';
+import {
+  S, Live, MODEL_CTX, MODEL_FALLBACK, MODEL_FALLBACK_BY_PROVIDER,
+  getActiveApiKey, getApiKeys
+} from './state.js';
 import { est, sleep, Bus, toast } from './utils.js';
 
 const MAX_RETRIES = 5;
 const BASE_BACKOFF = 1000;
-const MAX_BACKOFF  = 30000;
+const MAX_BACKOFF = 30000;
 
 /**
  * API base URL.  When the server is running locally, requests
@@ -23,6 +26,29 @@ const MAX_BACKOFF  = 30000;
  * call Mistral directly without the proxy.
  */
 const API_BASE = '/v1';
+
+function cleanMessages(messages) {
+  return (messages || []).map(msg => {
+    const clean = { role: msg.role };
+    if (msg.content !== undefined) clean.content = msg.content;
+    if (msg.name) clean.name = msg.name;
+    if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
+    if (msg.tool_calls?.length) {
+      clean.tool_calls = msg.tool_calls.map(tc => {
+        const fn = tc.function || {};
+        return {
+          id: tc.id,
+          type: tc.type,
+          function: {
+            name: fn.name,
+            arguments: fn.arguments,
+          },
+        };
+      });
+    }
+    return clean;
+  });
+}
 
 /**
  * Stream a chat completion.
@@ -38,11 +64,13 @@ export async function streamChat(messages, tools = null, opts = {}) {
     model = S.model,
     temperature = S.temperature,
     max_tokens = S.maxTokens,
+    apiKey = getActiveApiKey(S.provider),
   } = opts;
 
-  if (!S.key) throw new Error('No API key. Open settings → save your Mistral key.');
+  if (!apiKey) throw new Error(`No API key for ${S.provider}. Open settings and save one.`);
 
-  const body = { model, messages, temperature, max_tokens, stream: true };
+  const body = { provider: S.provider, model, messages: cleanMessages(messages), temperature, max_tokens, stream: true };
+  if (S.provider === 'custom') body.base_url = S.customProvider.baseUrl;
   if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
 
   Live.abortCtrl = new AbortController();
@@ -54,7 +82,7 @@ export async function streamChat(messages, tools = null, opts = {}) {
     method: 'POST',
     signal: finalSignal,
     headers: {
-      'Authorization': 'Bearer ' + S.key,
+      'Authorization': 'Bearer ' + apiKey,
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
     },
@@ -62,7 +90,7 @@ export async function streamChat(messages, tools = null, opts = {}) {
   });
   if (!r.ok) {
     const e = await r.json().catch(() => ({ message: r.statusText }));
-    const err = new Error('Mistral: ' + (e.message || e.error?.message || r.statusText));
+    const err = new Error((e.message || e.error?.message || r.statusText));
     err.status = r.status;
     err.headers = r.headers;
     throw err;
@@ -91,6 +119,14 @@ export async function streamChat(messages, tools = null, opts = {}) {
         if (data === '[DONE]') continue;
         let parsed;
         try { parsed = JSON.parse(data); } catch { continue; }
+
+        if (parsed.error) {
+          const err = new Error(parsed.error.message || 'API Error');
+          err.status = parsed.error.status || 500;
+          err.type = parsed.error.type;
+          throw err;
+        }
+
         if (parsed.model) finalModel = parsed.model;
         if (parsed.usage) usage = parsed.usage;
         const delta = parsed.choices?.[0]?.delta;
@@ -129,29 +165,36 @@ export async function streamChat(messages, tools = null, opts = {}) {
  * and the test path.
  */
 export async function apiChat(messages, tools = null, opts = {}) {
-  const { signal, model = S.model, temperature = S.temperature, max_tokens = S.maxTokens } = opts;
-  if (!S.key) throw new Error('No API key. Open settings → save your Mistral key.');
+  const {
+    signal,
+    model = S.model,
+    temperature = S.temperature,
+    max_tokens = S.maxTokens,
+    apiKey = getActiveApiKey(S.provider),
+  } = opts;
+  if (!apiKey) throw new Error(`No API key for ${S.provider}. Open settings and save one.`);
 
   Live.abortCtrl = new AbortController();
   const finalSignal = signal
     ? combineSignals([signal, Live.abortCtrl.signal])
     : Live.abortCtrl.signal;
 
-  const body = { model, messages, temperature, max_tokens };
+  const body = { provider: S.provider, model, messages: cleanMessages(messages), temperature, max_tokens };
+  if (S.provider === 'custom') body.base_url = S.customProvider.baseUrl;
   if (tools?.length) { body.tools = tools; body.tool_choice = 'auto'; }
 
   const r = await fetch(API_BASE + '/chat/completions', {
     method: 'POST',
     signal: finalSignal,
     headers: {
-      'Authorization': 'Bearer ' + S.key,
+      'Authorization': 'Bearer ' + apiKey,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
   });
   if (!r.ok) {
     const e = await r.json().catch(() => ({ message: r.statusText }));
-    const err = new Error('Mistral: ' + (e.message || e.error?.message || r.statusText));
+    const err = new Error((e.message || e.error?.message || r.statusText));
     err.status = r.status;
     throw err;
   }
@@ -171,20 +214,43 @@ export async function apiChat(messages, tools = null, opts = {}) {
 export async function streamChatWithRetry(messages, tools, opts = {}) {
   let model = opts.model || S.model;
   const { onDelta, onToolDelta } = opts;
+  // Use per-provider fallback chain if available
+  const providerFallback = MODEL_FALLBACK_BY_PROVIDER[S.provider] || MODEL_FALLBACK;
+  const fallbackChain = providerFallback.includes(model)
+    ? providerFallback
+    : [model, ...providerFallback.filter(m => m !== model)];
+  const keyChain = getApiKeys(S.provider);
+  if (!keyChain.length) throw new Error(`No API key for ${S.provider}. Open settings and save one.`);
+  let keyIndex = Math.max(0, keyChain.findIndex(k => k.active));
   let lastErr = null;
 
-  for (let modelAttempt = 0; modelAttempt < MODEL_FALLBACK.length; modelAttempt++) {
+  for (let modelAttempt = 0; modelAttempt < fallbackChain.length; modelAttempt++) {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        const out = await streamChat(messages, tools, { ...opts, model, onDelta, onToolDelta });
+        const out = await streamChat(messages, tools, {
+          ...opts,
+          model,
+          apiKey: keyChain[keyIndex].key,
+          onDelta,
+          onToolDelta,
+        });
         if (out.usage) {
-          S.ctxUsage = out.usage.prompt_tokens / (MODEL_CTX[out.model] || MODEL_CTX[model] || 32768);
+          const ctx = MODEL_CTX[out.model] || MODEL_CTX[model] || 32768;
+          S.ctxUsage = out.usage.prompt_tokens / ctx;
+          S.lastUsage = out.usage; // stash for cost display
           Bus.emit('ctx:update', S.ctxUsage);
+          Bus.emit('tokens:update', out.usage);
         }
         return out;
       } catch (e) {
         lastErr = e;
         if (e.name === 'AbortError') throw e;
+        if ((e.status === 401 || e.status === 403 || e.status === 429) && keyIndex < keyChain.length - 1) {
+          keyIndex += 1;
+          toast(`Provider key fallback: ${keyChain[keyIndex].name || `key ${keyIndex + 1}`}`, 3000);
+          Bus.emit('api:key-fallback', { provider: S.provider, model, keyIndex, status: e.status });
+          continue;
+        }
         if (e.status && e.status >= 400 && e.status < 429) throw e;
         const wait = backoffMs(e, attempt);
         toast(`⚠ ${e.status || 'Error'}: retrying in ${(wait / 1000).toFixed(1)}s (${attempt + 1}/${MAX_RETRIES})…`, 3000);
@@ -193,7 +259,7 @@ export async function streamChatWithRetry(messages, tools, opts = {}) {
         if (opts.signal?.aborted || Live.abortCtrl?.signal.aborted) throw e;
       }
     }
-    const nextModel = MODEL_FALLBACK[MODEL_FALLBACK.indexOf(model) + 1];
+    const nextModel = fallbackChain[fallbackChain.indexOf(model) + 1];
     if (!nextModel || nextModel === model) break;
     toast(`🔽 Stepping down: ${model} → ${nextModel}`, 3000);
     Bus.emit('api:stepdown', { from: model, to: nextModel });
@@ -244,4 +310,3 @@ export function ctxPct() {
   if (S.ctxUsage > 0) return S.ctxUsage;
   return estCtx() / (MODEL_CTX[S.model] || 32768);
 }
-

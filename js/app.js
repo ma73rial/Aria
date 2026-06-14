@@ -1,8 +1,8 @@
 // Entry point and main agent loop.
 // Bootstraps on DOMContentLoaded, then runs the tool-calling loop.
 
-import { S, Live } from './state.js';
-import { Bus, toast, fileToBase64, fileToText } from './utils.js';
+import { S, Live, getActiveApiKey } from './state.js';
+import { Bus, toast, fileToBase64, fileToText, scrollBot } from './utils.js';
 import { renderRich, highlightAll } from './markdown.js';
 import { ICONS } from './icons.js';
 import { initIDBSession, machGit, switchWorkspace, refreshSessions } from './fs.js';
@@ -36,7 +36,7 @@ export async function afterFsInit(type, name) {
 
 export async function runAgent(input) {
   if (S.running) return;
-  if (!S.key) {
+  if (!getActiveApiKey(S.provider)) {
     // Show the setup modal so the user can enter a key
     const setupModal = document.getElementById('setup-modal');
     if (setupModal) {
@@ -51,24 +51,47 @@ export async function runAgent(input) {
   setInput(false);
 
   // Build the prompt content with attached file data.
+  // Images become multimodal content blocks (data URL) so vision-capable
+  // models can actually see them. Text files are inlined as before.
+  const imageBlocks = [];
   let content = input;
   if (S.files.length) {
-    content += '\n\n**Attached files:**\n';
+    let textAppendix = '';
     for (const f of S.files) {
       if (f.type.startsWith('image/')) {
-        content += '- ' + f.name + ' (' + f.type + ', ' + Math.round(f.size / 1024) + 'KB)\n';
+        try {
+          const dataUrl = await fileToBase64(f);
+          imageBlocks.push({ type: 'image_url', image_url: { url: dataUrl } });
+        } catch {
+          textAppendix += '- ' + f.name + ' (' + f.type + ', failed to read)\n';
+        }
       } else {
         const t = await fileToText(f, 2000);
-        content += '- ' + f.name + ' (' + (f.type || 'text/plain') + ')\n```\n' + t + '\n```\n';
+        textAppendix += '- ' + f.name + ' (' + (f.type || 'text/plain') + ')\n```\n' + t + '\n```\n';
       }
     }
-    content += '\nNote: Files are available for analysis. Image files are processed separately.';
+    if (textAppendix) content += '\n\n**Attached files:**\n' + textAppendix;
+    if (imageBlocks.length) {
+      content += '\n\n[' + imageBlocks.length + ' image' + (imageBlocks.length === 1 ? '' : 's') +
+        ' attached — if your model does not support vision, say so rather than guessing at their contents.]';
+    }
   }
 
   addUserMsg(input, S.files);
   S.files = [];
   renderAttachBar();
-  S.msgs.push({ role: 'user', content, _ts: Date.now() });
+
+  // If there are images, send a multimodal content array: text block first,
+  // then one image block per attached image.
+  if (imageBlocks.length) {
+    S.msgs.push({
+      role: 'user',
+      content: [{ type: 'text', text: content }, ...imageBlocks],
+      _ts: Date.now(),
+    });
+  } else {
+    S.msgs.push({ role: 'user', content, _ts: Date.now() });
+  }
   startTurn();
 
   let turns = 0;
@@ -76,19 +99,23 @@ export async function runAgent(input) {
     while (turns++ < 22) {
       const pct = ctxPct();
       updateCtxBar(pct);
-      if (pct > 0.76) await compressCtx();
+      if (pct > 0.76) {
+        toast('Context at ' + (pct * 100).toFixed(0) + '% — compressing…', 3000);
+        await compressCtx();
+      }
 
       const apiMsgs = [{ role: 'system', content: buildSysPrompt() }, ...S.msgs];
 
       let resp;
-      // During streaming we avoid repeatedly parsing partial Markdown.
-      // Show plain text via `textContent` (no innerHTML) and debounce updates.
+      // During streaming, periodically render markdown so headings, lists,
+      // and code blocks appear progressively instead of as raw text.
+      // We debounce renderRich() calls (it's cheap but re-parses the full
+      // string each time) and always do a final full render on completion.
       let renderTimer = null;
       let latestFull = '';
       try {
         resp = await streamChatWithRetry(apiMsgs, TOOLS, {
           onDelta(chunk, full) {
-            // Update the streaming thought block in real-time as plain text.
             if (!currentTurn) return;
             latestFull = full;
             let last = currentTurn.querySelector('.thought:last-child');
@@ -98,16 +125,31 @@ export async function runAgent(input) {
               currentTurn.appendChild(b);
               last = b;
             }
-            // Debounce to avoid excessive DOM churn and partial HTML parsing.
+            // Debounce the markdown render to avoid excessive re-parsing.
             clearTimeout(renderTimer);
             renderTimer = setTimeout(() => {
-              // During streaming we only set textContent to avoid malformed HTML.
-              last.textContent = latestFull;
-            }, 150);
+              try {
+                last.innerHTML = renderRich(latestFull);
+                highlightAll(last);
+              } catch {
+                // If markdown parsing chokes on a partial token, fall back
+                // to plain text for this tick — it'll self-correct on the
+                // next render or the final pass.
+                last.textContent = latestFull;
+              }
+              scrollBot();
+            }, 120);
           },
         });
-        // Clear any pending streaming render after stream completes.
+        // Final render with the complete content (ensures fences/tables close).
         clearTimeout(renderTimer);
+        if (currentTurn && latestFull) {
+          const last = currentTurn.querySelector('.thought:last-child');
+          if (last) {
+            last.innerHTML = renderRich(latestFull);
+            highlightAll(last);
+          }
+        }
       } catch (e) {
         if (e.name === 'AbortError') { closeTurn(); break; }
         addErrBlock('API error: ' + e.message);
@@ -137,7 +179,8 @@ export async function runAgent(input) {
             // Tools that require user input suspend the run-loop while waiting.
             // We re-enable the textarea (so the user can type an answer) but
             // keep S.running = true so no second runAgent() can be launched.
-            const isUserInputTool = tc.function.name === 'clarify' || tc.function.name === 'simple_question';
+            const isUserInputTool = tc.function.name === 'clarify' || tc.function.name === 'simple_question'
+              || (tc.function.name === 'suggest_mode' && S.mode !== 'yolo');
             if (isUserInputTool) setInput(true);
             const toolResult = execTool(tc.function.name, args);
             result = toolResult instanceof Promise ? await toolResult : toolResult;
@@ -160,23 +203,25 @@ export async function runAgent(input) {
         continue;
       }
 
-      // Done: no tool calls.
+      // Done: no tool calls — convert streaming thought into a final block.
       closeTurn();
-      // Convert the streaming thought to a final block instead of creating a new one.
       if (msg.content?.trim()) {
         const thought = currentTurn?.querySelector('.thought:last-child');
         if (thought) {
-          // Replace streaming plain text with final rendered Markdown.
-          thought.innerHTML = renderRich(msg.content.trim());
-          highlightAll(thought);
-          // Restyle the thought as a final block.
-          thought.className = 'final';
-          // Prepend the green dot.
+          // Rebuild as a proper .final structure so CSS flex layout works correctly.
+          // (Dumping innerHTML directly into the thought div leaves markdown content
+          // as bare flex children, which causes tables to lay out horizontally.)
           const dot = document.createElement('div');
           dot.className = 'fdot';
-          thought.insertBefore(dot, thought.firstChild);
+          const inner = document.createElement('div');
+          inner.className = 'final-content';
+          inner.innerHTML = renderRich(msg.content.trim());
+          highlightAll(inner);
+          thought.className = 'final';
+          thought.innerHTML = '';
+          thought.appendChild(dot);
+          thought.appendChild(inner);
         } else {
-          // Fallback: no streaming thought exists, create one.
           addFinal(msg.content.trim());
         }
       }
@@ -203,10 +248,19 @@ async function compressCtx() {
   if (S.msgs.length < 8) return;
   const old = S.msgs.slice(0, -4);
   const keep = S.msgs.slice(-4);
+  // Strip image data URLs before summarizing — they're large and irrelevant
+  // to a text summary, and would bloat the compression request itself.
+  const oldForSummary = old.map(m => {
+    if (Array.isArray(m.content)) {
+      const textBlock = m.content.find(b => b.type === 'text');
+      return { ...m, content: (textBlock?.text || '') + ' [image attached]' };
+    }
+    return m;
+  });
   try {
     const r = await apiChat([{
       role: 'user',
-      content: 'Summarize this conversation concisely (max 250 words), preserving all key decisions, file paths, and code changes:\n\n' + JSON.stringify(old),
+      content: 'Summarize this conversation concisely (max 250 words), preserving all key decisions, file paths, and code changes:\n\n' + JSON.stringify(oldForSummary),
     }]);
     const sum = r.choices?.[0]?.message?.content || 'Previous context';
     S.msgs = [
@@ -220,7 +274,11 @@ async function compressCtx() {
 
 function saveConv() {
   if (!S.convId) S.convId = Math.random().toString(36).slice(2, 9);
-  const title = (S.msgs.find(m => m.role === 'user')?.content || 'New chat').slice(0, 50);
+  const firstUser = S.msgs.find(m => m.role === 'user')?.content;
+  const firstUserText = Array.isArray(firstUser)
+    ? (firstUser.find(b => b.type === 'text')?.text || 'Image message')
+    : (firstUser || 'New chat');
+  const title = firstUserText.slice(0, 50);
   const existing = S.convs.findIndex(c => c.id === S.convId);
   const c = {
     id: S.convId,
@@ -266,4 +324,3 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Refresh session list.
   refreshSessions();
 });
-

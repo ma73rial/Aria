@@ -1,0 +1,761 @@
+"""
+ARIA Backend Proxy Server
+=========================
+Proxies chat completion requests to the Mistral AI API using the
+official Mistral Python SDK.  Handles both streaming (SSE) and
+non-streaming calls, and transparently maps the front-end's plain
+JSON body into the strongly-typed SDK models — avoiding 422 errors
+that raw `fetch` requests would trigger due to API schema changes.
+
+Usage
+-----
+    # Start the server (port 8080 by default)
+    python server.py
+
+    # Or via uvicorn directly
+    uvicorn server:app --host 0.0.0.0 --port 8080 --reload
+
+Environment variables
+---------------------
+    MISTRAL_API_KEY     Optional.  If set, the server will use this key
+                        for every request.  Otherwise the client must
+                        provide one via the Authorization header.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from mistralai.client import Mistral
+
+try:
+    import httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:
+    _HTTPX_AVAILABLE = False
+    log_import_warn = True
+
+try:
+    from bs4 import BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("aria-proxy")
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# The server holds NO API key.  The client must send a Mistral API key
+# on every request via the ``Authorization: Bearer <key>`` header.
+# The key is stored client-side (localStorage) and is the user's own.
+
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+
+STATE = {"client": None, "key": None}
+
+
+async def run_in_thread(fn, *args, **kwargs):
+    """Run a sync call in a thread-pool so the async event loop stays responsive."""
+    import asyncio
+    import concurrent.futures
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        return await loop.run_in_executor(
+            ex, lambda: fn(*args, **kwargs)
+        )
+
+
+def _get_client(auth_header: str) -> Mistral:
+    """Return a (cached) Mistral client keyed by the request's bearer token.
+
+    If the ``Authorization`` header is missing or empty, fall back to the
+    ``MISTRAL_API_KEY`` environment variable. This makes local testing
+    easier – the client can set the key once in the environment instead of
+    sending it on every request.
+    """
+    if not auth_header:
+        # Fallback to environment variable when header is absent.
+        env_key = os.getenv("MISTRAL_API_KEY")
+        if not env_key:
+            raise HTTPException(status_code=401, detail="Missing Authorization header and no MISTRAL_API_KEY env var.")
+        key = env_key.strip()
+    else:
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization header must use the Bearer scheme.",
+            )
+        key = auth_header[len(prefix):].strip()
+        if not key:
+            raise HTTPException(status_code=401, detail="Empty API key.")
+
+    if key == STATE["key"] and STATE["client"]:
+        return STATE["client"]
+    client = Mistral(api_key=key)
+    STATE["key"] = key
+    STATE["client"] = client
+    return client
+
+
+# ---------------------------------------------------------------------------
+# Message / tool builders  (both stream and non-stream use the same TypedDicts)
+# ---------------------------------------------------------------------------
+
+# The Mistral SDK v2.x uses TypedDict unions discriminated by ``role``.
+# Both ChatCompletionRequestMessage and ChatCompletionStreamRequestMessage
+# accept the same SystemMessageTypedDict / UserMessageTypedDict / etc.
+
+
+def _build_messages(
+    raw: List[Dict[str, Any]],
+) -> List[Any]:
+    """Convert JSON messages into SDK TypedDicts."""
+    from mistralai.client.models.assistantmessage import (
+        AssistantMessageTypedDict,
+    )
+    from mistralai.client.models.systemmessage import SystemMessageTypedDict
+    from mistralai.client.models.toolmessage import ToolMessageTypedDict
+    from mistralai.client.models.usermessage import UserMessageTypedDict
+
+    out: List[Any] = []
+    for msg in raw:
+        role = msg.get("role", "")
+        content = msg.get("content")
+
+        if role == "system":
+            out.append(SystemMessageTypedDict(
+                content=content or "", role="system"
+            ))
+        elif role == "user":
+            out.append(UserMessageTypedDict(
+                content=content or "", role="user"
+            ))
+        elif role == "assistant":
+            d: Dict[str, Any] = {"role": "assistant"}
+            if content is not None:
+                d["content"] = content
+            if msg.get("tool_calls"):
+                d["tool_calls"] = msg["tool_calls"]
+            out.append(AssistantMessageTypedDict(**d))
+        elif role == "tool":
+            d: Dict[str, Any] = {"role": "tool", "content": content or ""}
+            if msg.get("tool_call_id"):
+                d["tool_call_id"] = msg["tool_call_id"]
+            if msg.get("name"):
+                d["name"] = msg["name"]
+            out.append(ToolMessageTypedDict(**d))
+        else:
+            log.warning("Unknown message role %r – sending as user", role)
+            out.append(UserMessageTypedDict(
+                content=content or "", role="user"
+            ))
+    return out
+
+
+def _build_tools(raw: List[Dict[str, Any]]) -> List[Any]:
+    """Convert raw JSON tool definitions into SDK Tool TypedDicts."""
+    from mistralai.client.models.tool import ToolTypedDict
+
+    out: List[Any] = []
+    for t in raw:
+        if t.get("type") == "function":
+            fn = t.get("function", {})
+            out.append(
+                ToolTypedDict(
+                    type="function",
+                    function={
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get(
+                            "parameters",
+                            {"type": "object", "properties": {}},
+                        ),
+                    },
+                )
+            )
+        else:
+            log.warning("Unknown tool type %r – skipping", t.get("type"))
+    return out
+
+
+def _build_tool_choice(raw: Any) -> Any:
+    """Map tool_choice to SDK-compatible value."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw  # "auto" | "none" | "any" | "required"
+    return raw  # ToolChoice object
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("ARIA proxy ready.  Awaiting client requests.")
+    yield
+    STATE["client"] = None
+    STATE["key"] = None
+
+
+app = FastAPI(
+    title="ARIA Mistral Proxy",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Static frontend (served from the project root)
+# ---------------------------------------------------------------------------
+#
+# Strategy:
+#   - /js/* is mounted as a static sub-app so all modules in js/ are served.
+#   - Top-level static files (styles.css, index.html) are served by
+#     individual routes.
+#   - /v1/* is reserved for API routes (defined below).
+#   - Any other GET path falls through to index.html (SPA-style fallback).
+
+# Serve the entire js/ directory at /js/*.
+app.mount(
+    "/js",
+    StaticFiles(directory=os.path.join(_PROJECT_ROOT, "js"), check_dir=True),
+    name="js-assets",
+)
+
+_NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
+@app.get("/")
+async def index():
+    return FileResponse(
+        os.path.join(_PROJECT_ROOT, "index.html"),
+        headers=_NO_CACHE,
+    )
+
+
+@app.get("/styles.css")
+async def styles_css():
+    return FileResponse(
+        os.path.join(_PROJECT_ROOT, "styles.css"),
+        media_type="text/css",
+        headers=_NO_CACHE,
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    f = os.path.join(_PROJECT_ROOT, "favicon.ico")
+    if os.path.isfile(f):
+        return FileResponse(f, headers=_NO_CACHE)
+    raise HTTPException(status_code=404)
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    """
+    SPA fallback: any GET that didn't match an API route or a static asset
+    serves index.html so the front-end can take over.
+    """
+    # Only fall back for paths that look like frontend routes (no file extension).
+    # Requests for missing static files will 404 instead of loading the SPA.
+    if "." in full_path:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(os.path.join(_PROJECT_ROOT, "index.html"))
+
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/chat/completions
+# ---------------------------------------------------------------------------
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """
+    Proxy to Mistral Chat Completions API.
+
+    Accepts the same JSON body as ``POST /v1/chat/completions`` on
+    ``api.mistral.ai``.  Supports both streaming (``stream: true``) and
+    non-streaming modes.
+    """
+    auth = request.headers.get("Authorization", "")
+    client = _get_client(auth)
+
+    try:
+        raw = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
+
+    # Extract fields from the request body
+    model: str = raw.get("model", "mistral-large-latest")
+    messages_raw: list[dict[str, Any]] = raw.get("messages", [])
+    stream: bool = raw.get("stream", False)
+    temperature: Any = raw.get("temperature")
+    max_tokens: Any = raw.get("max_tokens")
+    tools_raw: Any = raw.get("tools")
+    tool_choice_raw = raw.get("tool_choice")
+    top_p: Any = raw.get("top_p")
+    stop: Any = raw.get("stop")
+    random_seed: Any = raw.get("random_seed")
+    response_format: Any = raw.get("response_format")
+    presence_penalty: Any = raw.get("presence_penalty")
+    frequency_penalty: Any = raw.get("frequency_penalty")
+    safe_prompt: Any = raw.get("safe_prompt")
+
+    # Build messages via TypedDicts
+    messages = _build_messages(messages_raw)
+
+    # Build the kwargs dict that matches the SDK method signature
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    }
+
+    # Only pass non-None optional fields
+    for key, val in [
+        ("temperature", temperature),
+        ("max_tokens", max_tokens),
+        ("top_p", top_p),
+        ("stop", stop),
+        ("random_seed", random_seed),
+        ("presence_penalty", presence_penalty),
+        ("frequency_penalty", frequency_penalty),
+        ("safe_prompt", safe_prompt),
+        ("response_format", response_format),
+    ]:
+        if val is not None:
+            kwargs[key] = val
+
+    # Tools
+    if tools_raw:
+        kwargs["tools"] = _build_tools(tools_raw)
+        kwargs["tool_choice"] = _build_tool_choice(tool_choice_raw) or "auto"
+    elif tool_choice_raw:
+        log.debug("Ignoring tool_choice without tools.")
+
+    if stream:
+        from fastapi.responses import StreamingResponse as _SR
+        return _SR(
+            _sse_chunks(client, kwargs),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Non-streaming
+    result = await _non_stream_chat(client, kwargs)
+    return JSONResponse(content=result)
+
+
+# ---------------------------------------------------------------------------
+# Test streaming endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/test/stream")
+async def test_stream():
+    """Yield a few dummy SSE frames for client‑side testing.
+
+    This endpoint is useful when the developer does not have a valid
+    Mistral API key but wants to verify that the front‑end SSE parser works
+    correctly. It emits three simple ``data: {json}`` frames followed by a
+    ``[DONE]`` terminator.
+    """
+    async def generator():
+        # Simple payloads mimicking the shape of a real CompletionEvent.
+        for i in range(3):
+            payload = {"id": f"test-{i}", "object": "chat.completion.chunk", "choices": [{"delta": {"content": f"token{i}"}}]}
+            frame = f"data: {json.dumps(payload)}\n\n"
+            yield frame
+            await asyncio.sleep(0.1)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+
+def _serialise(obj: Any) -> Dict[str, Any]:
+    """Convert an SDK model into a plain dict (handles pydantic, NamedTuple, etc.)."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    if hasattr(obj, "_asdict"):
+        return obj._asdict()
+    if isinstance(obj, dict):
+        return obj
+    return dict(obj)
+
+
+async def _sse_chunks(client: Mistral, kwargs: Dict[str, Any]):
+    """
+    Async generator yielding raw SSE text strings.
+
+    Each string is one complete SSE frame: ``data: {json}\\n\\n``
+
+    This is exactly the format the browser-side SSE parser in
+    ``js/api.js`` reads via ``buf.indexOf('\\n\\n')`` and
+    ``ln.startsWith('data:')``.
+    """
+    try:
+        stream_resp = await client.chat.stream_async(**kwargs)
+    except Exception as exc:
+        log.exception("Stream init error")
+        # Handle 429 rate limiting errors specifically
+        if "rate limit" in str(exc).lower() or "429" in str(exc):
+            error_data = {
+                "error": {
+                    "message": "Rate limit exceeded",
+                    "type": "rate_limited",
+                    "code": 1300,
+                    "status": 429
+                }
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+        else:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        return
+
+    async for chunk in stream_resp:
+        raw = _serialise(chunk)
+        # Unwrap the CompletionEvent envelope {"data": {...}} -> {...}
+        if isinstance(raw, dict) and "data" in raw and len(raw) == 1:
+            raw = raw["data"]
+        frame = f"data: {json.dumps(raw)}\n\n"
+        log.debug("SSE chunk: %s", frame[:120])
+        yield frame
+
+    yield "data: [DONE]\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming
+# ---------------------------------------------------------------------------
+
+
+async def _non_stream_chat(
+    client: Mistral, kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Run a non-streaming chat completion and return the serialised result."""
+    try:
+        resp = await client.chat.complete_async(**kwargs)
+    except Exception as exc:
+        log.exception("Non-stream error")
+        # Handle 429 rate limiting errors specifically
+        if "rate limit" in str(exc).lower() or "429" in str(exc):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": {
+                        "message": "Rate limit exceeded",
+                        "type": "rate_limited",
+                        "code": 1300,
+                        "status": 429
+                    }
+                }
+            )
+        else:
+            raise HTTPException(status_code=502, detail=str(exc))
+
+    return _serialise(resp)
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/search  — DDG scrape, no API key required
+# ---------------------------------------------------------------------------
+
+_DDG_URL = "https://html.duckduckgo.com/html/"
+_BRAVE_URL = "https://search.brave.com/search"
+
+_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _parse_ddg_html(html: str, max_results: int) -> list[dict]:
+    """Parse DuckDuckGo HTML results page into structured dicts."""
+    if not _BS4_AVAILABLE:
+        # Fallback regex parser — works without bs4
+        results = []
+        # DDG HTML wraps each result in <div class="result">
+        blocks = re.findall(r'class="result__body".*?</div>', html, re.S)
+        for block in blocks[:max_results]:
+            title_m = re.search(r'class="result__a"[^>]*>(.*?)</a>', block, re.S)
+            url_m   = re.search(r'href="([^"]+)"', block)
+            snip_m  = re.search(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)', block, re.S)
+            if not title_m:
+                continue
+            title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip()
+            url   = url_m.group(1) if url_m else ''
+            snip  = re.sub(r'<[^>]+>', '', snip_m.group(1)).strip() if snip_m else ''
+            results.append({"title": title, "url": url, "snippet": snip})
+        return results
+
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for div in soup.select(".result__body")[:max_results]:
+        a    = div.select_one(".result__a")
+        snip = div.select_one(".result__snippet")
+        if not a:
+            continue
+        href = a.get("href", "")
+        # DDG wraps URLs — unwrap if needed
+        if href.startswith("/"):
+            m = re.search(r'uddg=([^&]+)', href)
+            if m:
+                from urllib.parse import unquote
+                href = unquote(m.group(1))
+        results.append({
+            "title":   a.get_text(strip=True),
+            "url":     href,
+            "snippet": snip.get_text(strip=True) if snip else "",
+        })
+    return results
+
+
+@app.get("/v1/search")
+async def search(q: str, max: int = 8):
+    """
+    Scrape DuckDuckGo HTML (no API key, no rate limits for personal use).
+    Returns JSON array of {title, url, snippet}.
+    """
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q is required")
+
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="httpx not installed. Run: pip install httpx beautifulsoup4"
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            headers=_SEARCH_HEADERS,
+            follow_redirects=True,
+            timeout=12.0,
+            verify=False,
+        ) as client:
+            resp = await client.post(_DDG_URL, data={"q": q, "kl": "us-en"})
+            resp.raise_for_status()
+
+        results = _parse_ddg_html(resp.text, max_results=max)
+        log.info("search %r → %d results", q, len(results))
+        return JSONResponse({"query": q, "results": results})
+
+    except httpx.HTTPStatusError as e:
+        log.warning("DDG search HTTP error %s for %r", e.response.status_code, q)
+        raise HTTPException(status_code=502, detail=f"Search upstream error: {e.response.status_code}")
+    except Exception as e:
+        log.exception("Search error for %r", q)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/extract  — fetch URL and return readable text
+# ---------------------------------------------------------------------------
+
+def _extract_text(html: str, max_chars: int = 12000) -> str:
+    """Strip HTML to readable prose. Uses bs4 if available, regex fallback."""
+    # Remove script/style blocks first
+    html = re.sub(r'<(script|style|noscript|header|footer|nav)[^>]*>.*?</\1>', '', html, flags=re.S | re.I)
+
+    if _BS4_AVAILABLE:
+        soup = BeautifulSoup(html, "html.parser")
+        # Prefer <article> or <main> if present
+        body = soup.find("article") or soup.find("main") or soup.body or soup
+        # Get text with newlines for block elements
+        lines = []
+        for el in body.descendants:
+            if hasattr(el, 'name'):
+                if el.name in ('h1','h2','h3','h4','h5','h6'):
+                    lines.append('\n## ' + el.get_text(strip=True))
+                elif el.name in ('p', 'li'):
+                    t = el.get_text(strip=True)
+                    if t:
+                        lines.append(t)
+        text = '\n'.join(lines)
+    else:
+        # Regex fallback
+        text = re.sub(r'<[^>]+>', ' ', html)
+        text = re.sub(r'&[a-z#0-9]+;', ' ', text)
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # Collapse excessive whitespace and trim
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text[:max_chars]
+
+
+@app.get("/v1/extract")
+async def extract(url: str, max_chars: int = 12000):
+    """
+    Fetch a URL and return clean readable text — strips nav, scripts, ads.
+    Used by the agent's extract_from_url tool for research workflows.
+    """
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="httpx not installed. Run: pip install httpx beautifulsoup4"
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            headers=_SEARCH_HEADERS,
+            follow_redirects=True,
+            timeout=15.0,
+            verify=False,
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            raise HTTPException(status_code=415, detail=f"Unsupported content type: {content_type}")
+
+        text = _extract_text(resp.text, max_chars=max_chars)
+        log.info("extract %r → %d chars", url, len(text))
+        return JSONResponse({"url": url, "text": text, "chars": len(text)})
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Upstream HTTP {e.response.status_code}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Extract error for %r", url)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/fetch  — general HTTP proxy for fetch_request tool
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/fetch")
+async def proxy_fetch(request: Request):
+    """
+    Proxy arbitrary HTTP requests server-side, bypassing browser CORS.
+    Body: { url, method?, headers?, body? }
+    """
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(status_code=501, detail="httpx not installed.")
+
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    url     = raw.get("url", "").strip()
+    method  = raw.get("method", "GET").upper()
+    headers = {**_SEARCH_HEADERS, **raw.get("headers", {})}
+    body    = raw.get("body")
+
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=20.0, verify=False
+        ) as client:
+            req_kwargs = {"headers": headers}
+            if body:
+                req_kwargs["content"] = body.encode() if isinstance(body, str) else body
+            resp = await client.request(method, url, **req_kwargs)
+
+        # Return raw text truncated to 12k chars — same as extract
+        content_type = resp.headers.get("content-type", "")
+        text = resp.text[:12000]
+        return JSONResponse({
+            "status": resp.status_code,
+            "content_type": content_type,
+            "body": text,
+        })
+    except Exception as e:
+        log.exception("Proxy fetch error for %r", url)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ARIA Mistral Proxy Server")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080, help="Port (default: 8080)"
+    )
+    parser.add_argument(
+        "--reload", action="store_true",
+        help="Enable auto-reload for development"
+    )
+    args = parser.parse_args()
+
+    print(f"🚀 ARIA starting on http://{args.host}:{args.port}")
+    print(f"   Frontend: http://{args.host}:{args.port}/")
+    print(f"   API:       http://{args.host}:{args.port}/v1/chat/completions")
+    print(f"   The server holds no API key — clients send it via Authorization header.")
+    uvicorn.run(
+        "server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info",
+    )

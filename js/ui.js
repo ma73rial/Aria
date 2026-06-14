@@ -10,6 +10,63 @@ let currentTurn = null;
 let workingEl = null;
 export { currentTurn, workingEl };
 
+// ─────────────────────────────────────────────────────────────
+// Blocking mode-switch widget (PLAN/EDIT modes).
+// suggest_mode in tools.js emits this and awaits `settle()` before
+// the agent loop continues — so the agent always knows the real
+// outcome (switched / skipped / cancelled) rather than assuming.
+// ─────────────────────────────────────────────────────────────
+Bus.on('widget:suggest_mode', ({ mode, reason, settle }) => {
+  const wrap = document.createElement('div');
+  wrap.className = 'mode-sug';
+
+  const r = document.createElement('div');
+  r.className = 'mode-sug-reason';
+  r.textContent = reason;
+
+  const ab = document.createElement('div');
+  ab.className = 'act-bubbles';
+
+  const lb = document.createElement('button');
+  lb.className = 'act-bub';
+  lb.textContent = mode === 'open_folder' ? '\ud83d\udcc1 Open Folder'
+    : mode === 'new_idb' ? '\ud83d\udfc4 New IDB Session'
+      : 'Switch to ' + mode.toUpperCase();
+
+  const sb = document.createElement('button');
+  sb.className = 'act-bub';
+  sb.textContent = 'Skip';
+  sb.style.marginLeft = '6px';
+
+  const modeActions = {
+    plan: () => setMode('plan'),
+    edit: () => setMode('edit'),
+    yolo: () => setMode('yolo'),
+    open_folder: () => document.getElementById('open-folder-btn')?.click(),
+    new_idb: () => { import('./fs.js').then(m => m.initIDBSession()); },
+  };
+
+  const disable = () => { lb.disabled = true; lb.style.opacity = '.4'; sb.disabled = true; sb.style.opacity = '.4'; };
+
+  lb.onclick = () => {
+    disable();
+    modeActions[mode]?.();
+    const desc = (mode === 'open_folder' || mode === 'new_idb')
+      ? `User accepted: ${mode === 'open_folder' ? 'opening folder picker' : 'creating a new workspace session'}.`
+      : `Switched to ${mode.toUpperCase()}.`;
+    settle({ success: true, _ui: 'suggest_mode', mode, reason, resolved: 'switched', message: desc });
+  };
+  sb.onclick = () => {
+    disable();
+    settle({ success: true, _ui: 'suggest_mode', mode, reason, resolved: 'skipped',
+      message: `User stayed in ${S.mode.toUpperCase()} — did not switch to ${mode.toUpperCase()}.` });
+  };
+
+  ab.append(lb, sb);
+  wrap.append(r, ab);
+  appendToTurn(wrap);
+});
+
 export function startTurn() {
   const msgs = document.getElementById('msgs');
   document.getElementById('welcome')?.remove();
@@ -30,6 +87,8 @@ export function startTurn() {
 }
 
 export function closeTurn() {
+  if (currentTurn?.dataset.closed === '1') return;
+  if (currentTurn) currentTurn.dataset.closed = '1';
   if (Live.tickTimer) { clearInterval(Live.tickTimer); Live.tickTimer = null; }
   if (workingEl) {
     const el = workingEl.querySelector('.working-txt');
@@ -98,6 +157,8 @@ function toolLabel(name, args) {
     rename_file: 'Renamed ' + A(args.old_path) + ' \u2192 ' + A(args.new_path),
     make_directory: 'Created directory ' + A(args.path),
     fetch_request: 'Fetched ' + A(args.url),
+    web_search: 'Searched web: ' + A(args.query),
+    extract_from_url: 'Extracted ' + A(args.url),
     clarify: 'Asked a question',
     simple_question: 'Asked a question',
     think_deeper: 'Thinking deeper\u2026',
@@ -111,6 +172,7 @@ function toolLabel(name, args) {
     git_status: 'Checked git status',
     save_to_memory: 'Saved memory: ' + A(args.key),
     search_conversations: 'Searched: ' + A(args.query),
+    search_in_files: 'Searched files: ' + A(args.pattern) + (args.file_glob ? ' [' + esc(args.file_glob) + ']' : ''),
     date_now: 'Got current time',
     make_pdf: 'PDF: ' + A(args.filename || 'doc'),
     suggest_mode: 'Suggested: ' + A(args.mode),
@@ -132,6 +194,8 @@ export function renderToolResult(name, result) {
   const ui = result._ui;
 
   if (ui === 'suggest_mode') {
+    // Non-blocking path (YOLO mode): tool already returned, render
+    // an informational widget with action buttons + auto-apply timeout.
     const wrap = document.createElement('div');
     wrap.className = 'mode-sug';
     const r = document.createElement('div');
@@ -158,7 +222,7 @@ export function renderToolResult(name, result) {
     const disable = () => { lb.disabled = true; lb.style.opacity = '.4'; sb.disabled = true; sb.style.opacity = '.4'; };
     lb.onclick = () => { modeActions[result.mode]?.(); disable(); };
     sb.onclick = disable;
-    if (S.mode === 'yolo') setTimeout(() => { modeActions[result.mode]?.(); disable(); }, 10000);
+    setTimeout(() => { modeActions[result.mode]?.(); disable(); }, 10000);
     ab.append(lb, sb);
     wrap.append(r, ab);
     appendToTurn(wrap);
@@ -221,11 +285,38 @@ export function renderToolResult(name, result) {
     return;
   }
 
+  if (ui === 'search' && result.results) {
+    const wrap = document.createElement('div');
+    wrap.className = 'search-results';
+    for (const r of result.results) {
+      const item = document.createElement('div');
+      item.className = 'search-result-item';
+      item.innerHTML =
+        '<a class="search-result-title" href="' + esc(r.url) + '" target="_blank" rel="noopener">' + esc(r.title) + '</a>' +
+        '<div class="search-result-url">' + esc(r.url) + '</div>' +
+        (r.snippet ? '<div class="search-result-snip">' + esc(r.snippet) + '</div>' : '');
+      wrap.appendChild(item);
+    }
+    appendToTurn(wrap);
+    return;
+  }
+
   if (ui === 'subagent' && result.summary) {
     const note = document.createElement('div');
     note.className = 'subagent-result';
     note.textContent = result.summary.slice(0, 300);
     appendToTurn(note);
+    return;
+  }
+
+  if (name === 'make_pdf') {
+    const el = document.createElement('div');
+    el.className = 'tool-result-note';
+    el.style.cssText = 'font-size:11px;color:var(--txt3);padding:4px 8px;font-family:var(--mono);';
+    el.innerHTML = result.success
+      ? '📄 Print dialog opened — save as PDF from your browser.'
+      : '❌ PDF failed: ' + esc(result.message || '');
+    appendToTurn(el);
   }
 }
 
@@ -313,7 +404,16 @@ export function addUserMsg(text, files) {
   wrap.className = 'msg-user';
   const bub = document.createElement('div');
   bub.className = 'user-bub';
-  bub.innerHTML = esc(text).replace(/@(\S+)/g, '<span class="fref">@$1</span>');
+  // `text` may be a multimodal content array ([{type:'text',...}, {type:'image_url',...}])
+  // when re-rendering a saved conversation that included image attachments.
+  let displayText = text;
+  let imageCount = 0;
+  if (Array.isArray(text)) {
+    const textBlock = text.find(b => b.type === 'text');
+    displayText = textBlock?.text || '';
+    imageCount = text.filter(b => b.type === 'image_url').length;
+  }
+  bub.innerHTML = esc(displayText).replace(/@(\S+)/g, '<span class="fref">@$1</span>');
   if (files?.length) {
     const bar = document.createElement('div');
     bar.className = 'user-attach';
@@ -323,6 +423,14 @@ export function addUserMsg(text, files) {
       c.innerHTML = ICONS.paperclip(12) + ' <span>' + esc(f.name) + '</span>';
       bar.appendChild(c);
     }
+    bub.appendChild(bar);
+  } else if (imageCount) {
+    const bar = document.createElement('div');
+    bar.className = 'user-attach';
+    const c = document.createElement('span');
+    c.className = 'user-attach-chip';
+    c.innerHTML = ICONS.paperclip(12) + ' <span>' + imageCount + ' image' + (imageCount === 1 ? '' : 's') + '</span>';
+    bar.appendChild(c);
     bub.appendChild(bar);
   }
   wrap.appendChild(bub);
@@ -439,6 +547,20 @@ export async function updateFileTree(dir) {
     const target = dir || S.cwd;
     const items = await fsList(target);
     el.innerHTML = '';
+
+    // Filter input — retained across re-renders via data attribute.
+    const existingFilter = el.dataset.filter || '';
+    const filterWrap = document.createElement('div');
+    filterWrap.style.cssText = 'padding:3px 0 4px;';
+    const filterInp = document.createElement('input');
+    filterInp.type = 'text';
+    filterInp.placeholder = 'Filter files…';
+    filterInp.value = existingFilter;
+    filterInp.style.cssText = 'width:100%;padding:2px 5px;font-size:10px;background:var(--surf2);border:1px solid var(--border);border-radius:3px;color:var(--txt1);box-sizing:border-box;';
+    filterInp.oninput = () => { el.dataset.filter = filterInp.value; _renderItems(filterInp.value.toLowerCase()); };
+    filterWrap.appendChild(filterInp);
+    el.appendChild(filterWrap);
+
     const bc = document.createElement('div');
     bc.className = 'ftree-bc';
     const rootPath = S.fsMode === 'idb' ? 'idb://' + S.idbSess + '/' : '/';
@@ -454,36 +576,56 @@ export async function updateFileTree(dir) {
     }
     el.appendChild(bc);
 
-    if (!items.length) {
-      el.innerHTML += '<div style="color:var(--txt3);font-size:10px;padding:3px">Empty workspace</div>';
-      return;
-    }
-    items.sort((a, b) => (a.type === 'dir' && b.type !== 'dir') ? -1 : (a.type !== 'dir' && b.type === 'dir') ? 1 : a.name.localeCompare(b.name));
-    for (const it of items.slice(0, 80)) {
-      const e = document.createElement('div');
-      e.className = 'fitem' + (it.type === 'dir' ? ' dir' : '');
-      const fileIconSvg = it.type === 'dir' ? ICONS.folder(12) : fileIcon(it.name, 12);
-      e.innerHTML = '<span class="fitem-icon">' + fileIconSvg + '</span><span>' + esc(it.name) + '</span>';
-      e.onclick = async () => {
-        if (it.type === 'dir') {
-          const newDir = S.fsMode === 'idb' ? S.cwd + it.name + '/' : it.name;
-          await updateFileTree(newDir);
-        } else {
-          try {
-            const p = it.path || (S.fsMode === 'idb' ? S.cwd + it.name : it.name);
-            const c = await fsRead(p);
-            showCodeBlk(it.name, c);
-          } catch (er) { toast('Read error: ' + er.message); }
-        }
-      };
-      el.appendChild(e);
-    }
-    if (items.length > 80) {
-      const m = document.createElement('div');
-      m.style.cssText = 'font-size:10px;color:var(--txt3);padding:3px 6px';
-      m.textContent = '+' + (items.length - 80) + ' more';
-      el.appendChild(m);
-    }
+    const listEl = document.createElement('div');
+    listEl.className = 'ftree-list';
+    el.appendChild(listEl);
+
+    const sortedItems = [...items].sort((a, b) =>
+      (a.type === 'dir' && b.type !== 'dir') ? -1 :
+      (a.type !== 'dir' && b.type === 'dir') ? 1 :
+      a.name.localeCompare(b.name));
+
+    const _renderItems = (filter) => {
+      listEl.innerHTML = '';
+      const visible = filter
+        ? sortedItems.filter(it => it.name.toLowerCase().includes(filter))
+        : sortedItems;
+      const page = visible.slice(0, 120);
+      if (!page.length) {
+        listEl.innerHTML = '<div style="color:var(--txt3);font-size:10px;padding:3px">' +
+          (filter ? 'No matches.' : 'Empty workspace') + '</div>';
+        return;
+      }
+      for (const it of page) {
+        const e = document.createElement('div');
+        e.className = 'fitem' + (it.type === 'dir' ? ' dir' : '');
+        const fileIconSvg = it.type === 'dir' ? ICONS.folder(12) : fileIcon(it.name, 12);
+        e.innerHTML = '<span class="fitem-icon">' + fileIconSvg + '</span><span>' + esc(it.name) + '</span>';
+        e.onclick = async () => {
+          if (it.type === 'dir') {
+            el.dataset.filter = '';
+            const newDir = S.fsMode === 'idb' ? target + it.name + '/' : it.name;
+            await updateFileTree(newDir);
+          } else {
+            try {
+              const p = it.path || (S.fsMode === 'idb' ? target + it.name : it.name);
+              const c = await fsRead(p);
+              showCodeBlk(it.name, c);
+            } catch (er) { toast('Read error: ' + er.message); }
+          }
+        };
+        listEl.appendChild(e);
+      }
+      if (visible.length > 120) {
+        const m = document.createElement('div');
+        m.style.cssText = 'font-size:10px;color:var(--txt3);padding:3px 6px';
+        m.textContent = '+' + (visible.length - 120) + ' more' + (filter ? ' matching' : '');
+        listEl.appendChild(m);
+      }
+    };
+
+    _renderItems(existingFilter);
+    if (!existingFilter) el.dataset.filter = '';
   } catch (e) {
     el.innerHTML = '<div style="color:var(--red);font-size:10px;padding:3px">' + esc(e.message) + '</div>';
   }
@@ -719,7 +861,9 @@ export function renderRewindUI() {
       const opt = document.createElement('div');
       opt.className = 'conv-item';
       opt.style.cssText = 'cursor:pointer;margin-bottom:4px;';
-      opt.innerHTML = '<div class="conv-title">' + esc(x.msg.content.slice(0, 80)) + (x.msg.content.length > 80 ? '...' : '') + '</div>' +
+      const c = x.msg.content;
+      const previewText = Array.isArray(c) ? (c.find(b => b.type === 'text')?.text || '(image message)') : (c || '');
+      opt.innerHTML = '<div class="conv-title">' + esc(previewText.slice(0, 80)) + (previewText.length > 80 ? '...' : '') + '</div>' +
         '<div class="conv-meta">Message ' + (i + 1) + '</div>';
       opt.onclick = () => {
         if (confirm('Rewind to this message? This will remove messages after this point and may undo file edits.')) {
@@ -829,12 +973,59 @@ export function hideEmptySections() {
   if (memSec) memSec.style.display = S.memory.length ? 'flex' : 'none';
 }
 
+// Rough per-million-token pricing for cost estimation (input/output, USD).
+// These are approximate public list prices — update as providers change.
+const _COST_PER_MTK = {
+  'mistral-large-latest':      [3.00, 9.00],
+  'mistral-medium-latest':     [0.40, 2.00],
+  'mistral-small-latest':      [0.10, 0.30],
+  'codestral-latest':          [0.30, 0.90],
+  'open-mistral-nemo':         [0.15, 0.15],
+  'gpt-4o':                    [2.50, 10.00],
+  'gpt-4o-mini':               [0.15,  0.60],
+  'gpt-4-turbo':               [10.00, 30.00],
+  'gpt-3.5-turbo':             [0.50,  1.50],
+  'claude-sonnet-4-20250514':  [3.00, 15.00],
+  'claude-3-5-sonnet-20241022':[3.00, 15.00],
+  'claude-3-opus-20240229':    [15.00, 75.00],
+  'claude-3-haiku-20240307':   [0.25,  1.25],
+  'llama-3.3-70b-versatile':   [0.59,  0.79],
+  'llama-3.1-8b-instant':      [0.05,  0.08],
+  'gemini-2.0-flash':          [0.10,  0.40],
+  'gemini-1.5-pro':            [1.25,  5.00],
+};
+
+function _estimateCost(usage, model) {
+  if (!usage) return null;
+  const rates = _COST_PER_MTK[model];
+  if (!rates) return null;
+  const [inRate, outRate] = rates;
+  const cost = (usage.prompt_tokens / 1e6) * inRate + (usage.completion_tokens / 1e6) * outRate;
+  return cost < 0.001 ? '<$0.001' : '$' + cost.toFixed(3);
+}
+
 // Update the footer model/ctx info
 export function updateFooterMeta() {
   const modelEl = document.getElementById('sb-footer-model');
-  if (modelEl) modelEl.textContent = S.model;
+  if (modelEl) modelEl.textContent = S.provider + '/' + S.model;
   const ctxEl = document.getElementById('sb-footer-ctx');
   if (ctxEl) ctxEl.textContent = 'CTX ' + (S.ctxUsage * 100).toFixed(1) + '%';
+
+  // Token counts + cost estimate (shown when we have usage data from the last call).
+  const tokEl = document.getElementById('sb-footer-tokens');
+  if (tokEl) {
+    const u = S.lastUsage;
+    if (u) {
+      const cost = _estimateCost(u, S.model);
+      tokEl.textContent = `↑${(u.prompt_tokens || 0).toLocaleString()} ↓${(u.completion_tokens || 0).toLocaleString()}${cost ? '  ' + cost : ''}`;
+      tokEl.title = `Prompt: ${u.prompt_tokens} tokens\nCompletion: ${u.completion_tokens} tokens\nTotal: ${u.total_tokens} tokens${cost ? '\nEst. cost: ' + cost : ''}`;
+      const sep = document.getElementById('sb-footer-tok-sep');
+      if (sep) sep.style.display = '';
+    } else {
+      tokEl.textContent = '';
+      tokEl.title = '';
+    }
+  }
 }
 
 function loadConv(id) {

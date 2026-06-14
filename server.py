@@ -27,6 +27,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -36,6 +39,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from mistralai.client import Mistral
+
+try:
+    import httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:
+    _HTTPX_AVAILABLE = False
+    log_import_warn = True
+
+try:
+    from bs4 import BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -138,7 +154,7 @@ def _build_messages(
             ))
         elif role == "user":
             out.append(UserMessageTypedDict(
-                content=content or "", role="user"
+                content=content if content is not None else "", role="user"
             ))
         elif role == "assistant":
             d: Dict[str, Any] = {"role": "assistant"}
@@ -160,6 +176,34 @@ def _build_messages(
                 content=content or "", role="user"
             ))
     return out
+
+
+def _sanitize_messages(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop ARIA-only fields before forwarding messages to any provider."""
+    cleaned: List[Dict[str, Any]] = []
+    for msg in raw or []:
+        d: Dict[str, Any] = {"role": msg.get("role", "user")}
+        if "content" in msg:
+            d["content"] = msg["content"]
+        if msg.get("name"):
+            d["name"] = msg["name"]
+        if msg.get("tool_call_id"):
+            d["tool_call_id"] = msg["tool_call_id"]
+        if msg.get("tool_calls"):
+            tool_calls = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                tool_calls.append({
+                    "id": tc.get("id", "") if isinstance(tc, dict) else "",
+                    "type": tc.get("type", "function") if isinstance(tc, dict) else "function",
+                    "function": {
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", ""),
+                    },
+                })
+            d["tool_calls"] = tool_calls
+        cleaned.append(d)
+    return cleaned
 
 
 def _build_tools(raw: List[Dict[str, Any]]) -> List[Any]:
@@ -285,6 +329,464 @@ async def spa_fallback(full_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Provider dispatch helpers
+# ---------------------------------------------------------------------------
+
+# Providers that speak the OpenAI-compatible /v1/chat/completions wire format.
+# We forward the request almost verbatim via httpx (no SDK needed).
+_OPENAI_COMPAT_PROVIDERS = {
+    "openai":    "https://api.openai.com/v1/chat/completions",
+    "groq":      "https://api.groq.com/openai/v1/chat/completions",
+    "mistral_direct": "https://api.mistral.ai/v1/chat/completions",  # fallback
+}
+
+_MODEL_LIST_URLS = {
+    "mistral": "https://api.mistral.ai/v1/models",
+    "openai": "https://api.openai.com/v1/models",
+    "groq": "https://api.groq.com/openai/v1/models",
+}
+
+# Anthropic has its own wire format.
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+
+# Gemini uses its own REST API.
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def _openai_compat_chat_url(base_url: str) -> str:
+    """Return a chat-completions URL from a user supplied OpenAI-compatible base."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=400, detail="Custom provider requires base_url.")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/chat/completions"
+    return base + "/v1/chat/completions"
+
+
+def _openai_compat_models_url(base_url: str) -> str:
+    """Return a models URL from a user supplied OpenAI-compatible base."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=400, detail="Custom provider requires base_url.")
+    if base.endswith("/models"):
+        return base
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/v1/models"
+
+
+async def _proxy_openai_compat(
+    url: str, key: str, raw: dict, stream: bool
+):
+    """Forward an OpenAI-compatible request via httpx, returning a StreamingResponse or JSONResponse."""
+    from fastapi.responses import StreamingResponse as _SR
+
+    # Strip ARIA-only fields before forwarding.
+    body = {k: v for k, v in raw.items() if k not in ("provider", "base_url")}
+    if "messages" in body:
+        body["messages"] = _sanitize_messages(body.get("messages", []))
+    body.pop("stream", None)
+    body["stream"] = stream
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" if stream else "application/json",
+    }
+
+    if stream:
+        async def _gen():
+            async with httpx.AsyncClient(verify=False, timeout=120) as client:
+                async with client.stream("POST", url, json=body, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        err = await resp.aread()
+                        yield f"data: {json.dumps({'error': {'message': err.decode(), 'status': resp.status_code}})}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield line + "\n\n"
+            yield "data: [DONE]\n\n"
+        return _SR(_gen(), media_type="text/event-stream",
+                   headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    else:
+        async with httpx.AsyncClient(verify=False, timeout=120) as client:
+            resp = await client.post(url, json=body, headers=headers)
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return JSONResponse(resp.json())
+
+
+def _parse_data_url(url: str) -> tuple[str, str] | None:
+    """Parse a `data:<mime>;base64,<data>` URL into (mime_type, base64_data).
+
+    Returns None if `url` isn't a base64 data URL (e.g. a remote http(s)
+    image URL — Anthropic/Gemini's REST APIs don't fetch arbitrary remote
+    URLs the way OpenAI-compatible APIs do, so those are skipped upstream).
+    """
+    m = re.match(r"^data:([^;]+);base64,(.+)$", url, re.S)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _to_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
+    """Split system message out and convert to Anthropic format."""
+    system = None
+    out = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system = content
+            continue
+        if role == "tool":
+            # Convert tool result to Anthropic tool_result content block
+            out.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id", ""),
+                    "content": content,
+                }]
+            })
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            blocks = []
+            if m.get("content"):
+                blocks.append({"type": "text", "text": m["content"]})
+            for tc in m["tool_calls"]:
+                blocks.append({
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "input": json.loads(tc["function"].get("arguments", "{}")),
+                })
+            out.append({"role": "assistant", "content": blocks})
+            continue
+        # User (or assistant-without-tool_calls) messages: content may be a
+        # plain string or a multimodal array of {type:'text'|'image_url',...}
+        # blocks (ARIA's frontend format, mirroring OpenAI's vision schema).
+        if isinstance(content, list):
+            blocks = []
+            for part in content:
+                ptype = part.get("type")
+                if ptype == "text":
+                    blocks.append({"type": "text", "text": part.get("text", "")})
+                elif ptype == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    parsed = _parse_data_url(url)
+                    if parsed:
+                        mime, data = parsed
+                        blocks.append({
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": mime, "data": data},
+                        })
+                    else:
+                        # Remote URL — Anthropic's messages API doesn't fetch
+                        # these; note it as text so the model isn't silently
+                        # missing context.
+                        blocks.append({"type": "text", "text": f"[Image attached: {url}]"})
+            out.append({"role": role, "content": blocks})
+            continue
+        out.append({"role": role, "content": content or ""})
+    return system, out
+
+
+def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
+    return [
+        {
+            "name": t["function"]["name"],
+            "description": t["function"].get("description", ""),
+            "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}}),
+        }
+        for t in tools if t.get("type") == "function"
+    ]
+
+
+def _anthropic_response_to_openai(data: dict, model: str) -> dict:
+    """Convert Anthropic /v1/messages response to OpenAI shape."""
+    content_blocks = data.get("content", [])
+    text = ""
+    tool_calls = []
+    for i, block in enumerate(content_blocks):
+        if block["type"] == "text":
+            text += block["text"]
+        elif block["type"] == "tool_use":
+            tool_calls.append({
+                "id": block["id"],
+                "type": "function",
+                "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
+                "index": i,
+            })
+    msg: dict = {"role": "assistant", "content": text or None}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    finish = "tool_calls" if tool_calls else "stop"
+    return {
+        "id": data.get("id", ""),
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
+        "usage": {
+            "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
+            "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
+            "total_tokens": (data.get("usage", {}).get("input_tokens", 0) +
+                             data.get("usage", {}).get("output_tokens", 0)),
+        },
+    }
+
+
+async def _proxy_anthropic(key: str, raw: dict, stream: bool):
+    """Forward to Anthropic /v1/messages, convert response to OpenAI shape."""
+    from fastapi.responses import StreamingResponse as _SR
+
+    model = raw.get("model", "claude-3-haiku-20240307")
+    system, messages = _to_anthropic_messages(raw.get("messages", []))
+
+    body: dict = {
+        "model": model,
+        "max_tokens": raw.get("max_tokens", 4096),
+        "messages": messages,
+    }
+    if system:
+        body["system"] = system
+    if raw.get("temperature") is not None:
+        body["temperature"] = raw["temperature"]
+    if raw.get("tools"):
+        body["tools"] = _openai_tools_to_anthropic(raw["tools"])
+        body["tool_choice"] = {"type": "auto"}
+
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": _ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+    if stream:
+        body["stream"] = True
+
+        async def _gen():
+            # Anthropic SSE → translate to OpenAI SSE on the fly
+            accumulated_text = ""
+            accumulated_tools: dict[int, dict] = {}
+            async with httpx.AsyncClient(verify=False, timeout=120) as client:
+                async with client.stream("POST", _ANTHROPIC_URL, json=body, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        err = await resp.aread()
+                        yield f"data: {json.dumps({'error': {'message': err.decode(), 'status': resp.status_code}})}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            ev = json.loads(data_str)
+                        except Exception:
+                            continue
+                        ev_type = ev.get("type", "")
+
+                        if ev_type == "content_block_delta":
+                            delta = ev.get("delta", {})
+                            idx = ev.get("index", 0)
+                            if delta.get("type") == "text_delta":
+                                t = delta.get("text", "")
+                                accumulated_text += t
+                                chunk = {"choices": [{"delta": {"content": t}, "index": 0}], "model": model}
+                                yield f"data: {json.dumps(chunk)}\n\n"
+                            elif delta.get("type") == "input_json_delta":
+                                partial = delta.get("partial_json", "")
+                                if idx not in accumulated_tools:
+                                    accumulated_tools[idx] = {"args": ""}
+                                accumulated_tools[idx]["args"] += partial
+                                chunk = {"choices": [{"delta": {"tool_calls": [{"index": idx, "function": {"arguments": partial}}]}, "index": 0}], "model": model}
+                                yield f"data: {json.dumps(chunk)}\n\n"
+
+                        elif ev_type == "content_block_start":
+                            block = ev.get("content_block", {})
+                            idx = ev.get("index", 0)
+                            if block.get("type") == "tool_use":
+                                accumulated_tools[idx] = {"id": block.get("id",""), "name": block.get("name",""), "args": ""}
+                                chunk = {"choices": [{"delta": {"tool_calls": [{"index": idx, "id": block.get("id",""), "type": "function", "function": {"name": block.get("name",""), "arguments": ""}}]}, "index": 0}], "model": model}
+                                yield f"data: {json.dumps(chunk)}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        return _SR(_gen(), media_type="text/event-stream",
+                   headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    else:
+        async with httpx.AsyncClient(verify=False, timeout=120) as client:
+            resp = await client.post(_ANTHROPIC_URL, json=body, headers=headers)
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return JSONResponse(_anthropic_response_to_openai(resp.json(), model))
+
+
+async def _proxy_gemini(key: str, raw: dict, stream: bool):
+    """Forward to Google Gemini generateContent, convert to OpenAI shape."""
+    from fastapi.responses import StreamingResponse as _SR
+
+    model = raw.get("model", "gemini-2.0-flash")
+    messages = raw.get("messages", [])
+
+    # Convert OpenAI messages to Gemini contents
+    system_parts = []
+    contents = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system_parts.append({"text": content})
+            continue
+        gemini_role = "model" if role == "assistant" else "user"
+        if role == "tool":
+            contents.append({"role": "user", "parts": [{"text": f"[Tool result]: {content}"}]})
+            continue
+        if isinstance(content, list):
+            # Multimodal content array (ARIA's vision format): convert
+            # image_url data URLs to Gemini's inline_data parts.
+            parts = []
+            for part in content:
+                ptype = part.get("type")
+                if ptype == "text":
+                    parts.append({"text": part.get("text", "")})
+                elif ptype == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    parsed = _parse_data_url(url)
+                    if parsed:
+                        mime, data = parsed
+                        parts.append({"inline_data": {"mime_type": mime, "data": data}})
+                    else:
+                        parts.append({"text": f"[Image attached: {url}]"})
+            contents.append({"role": gemini_role, "parts": parts})
+            continue
+        contents.append({"role": gemini_role, "parts": [{"text": content}]})
+
+    body: dict = {"contents": contents}
+    if system_parts:
+        body["system_instruction"] = {"parts": system_parts}
+    if raw.get("temperature") is not None:
+        body.setdefault("generationConfig", {})["temperature"] = raw["temperature"]
+    if raw.get("max_tokens"):
+        body.setdefault("generationConfig", {})["maxOutputTokens"] = raw["max_tokens"]
+
+    endpoint = "streamGenerateContent" if stream else "generateContent"
+    url = f"{_GEMINI_BASE}/{model}:{endpoint}?key={key}"
+    if stream:
+        url += "&alt=sse"
+
+    if stream:
+        async def _gen():
+            async with httpx.AsyncClient(verify=False, timeout=120) as client:
+                async with client.stream("POST", url, json=body) as resp:
+                    if resp.status_code >= 400:
+                        err = await resp.aread()
+                        yield f"data: {json.dumps({'error': {'message': err.decode(), 'status': resp.status_code}})}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            ev = json.loads(data_str)
+                        except Exception:
+                            continue
+                        text = ""
+                        for cand in ev.get("candidates", []):
+                            for part in cand.get("content", {}).get("parts", []):
+                                text += part.get("text", "")
+                        if text:
+                            chunk = {"choices": [{"delta": {"content": text}, "index": 0}], "model": model}
+                            yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return _SR(_gen(), media_type="text/event-stream",
+                   headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    else:
+        async with httpx.AsyncClient(verify=False, timeout=120) as client:
+            resp = await client.post(url, json=body)
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        data = resp.json()
+        text = ""
+        for cand in data.get("candidates", []):
+            for part in cand.get("content", {}).get("parts", []):
+                text += part.get("text", "")
+        return JSONResponse({
+            "id": "gemini", "object": "chat.completion", "model": model,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/models
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/models")
+async def list_models(request: Request):
+    provider = (request.query_params.get("provider") or "mistral").lower().strip()
+    auth = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    key = auth[len(prefix):].strip() if auth.startswith(prefix) else ""
+
+    if provider == "anthropic":
+        return JSONResponse({"object": "list", "data": []})
+
+    if provider == "gemini":
+        key = key or os.getenv("GEMINI_API_KEY", "")
+        if not key:
+            raise HTTPException(status_code=401, detail="Missing API key.")
+        url = f"{_GEMINI_BASE}?key={key}"
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        data = resp.json()
+        models = []
+        for model in data.get("models", []):
+            name = model.get("name", "")
+            model_id = name.split("/", 1)[1] if name.startswith("models/") else name
+            methods = model.get("supportedGenerationMethods", [])
+            if model_id and ("generateContent" in methods or "streamGenerateContent" in methods):
+                models.append({"id": model_id, "object": "model"})
+        return JSONResponse({"object": "list", "data": models})
+
+    if provider == "custom":
+        url = _openai_compat_models_url(request.query_params.get("base_url", ""))
+    else:
+        url = _MODEL_LIST_URLS.get(provider)
+    if not url:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    env_key = os.getenv(f"{provider.upper()}_API_KEY", "")
+    key = key or env_key
+    if not key:
+        raise HTTPException(status_code=401, detail="Missing API key.")
+
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    data = resp.json()
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return JSONResponse({"object": "list", "data": data["data"]})
+    if isinstance(data, list):
+        return JSONResponse({"object": "list", "data": data})
+    return JSONResponse({"object": "list", "data": []})
+
+
+# ---------------------------------------------------------------------------
 # Route: POST /v1/chat/completions
 # ---------------------------------------------------------------------------
 
@@ -292,81 +794,68 @@ async def spa_fallback(full_path: str):
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     """
-    Proxy to Mistral Chat Completions API.
-
-    Accepts the same JSON body as ``POST /v1/chat/completions`` on
-    ``api.mistral.ai``.  Supports both streaming (``stream: true``) and
-    non-streaming modes.
+    Multi-provider chat completions proxy.
+    Dispatches to Mistral SDK, OpenAI-compat (openai/groq), Anthropic, or Gemini
+    based on the `provider` field in the request body.
     """
     auth = request.headers.get("Authorization", "")
-    client = _get_client(auth)
+    prefix = "Bearer "
+    if auth.startswith(prefix):
+        key = auth[len(prefix):].strip()
+    else:
+        key = os.getenv("MISTRAL_API_KEY", "")
+    if not key:
+        raise HTTPException(status_code=401, detail="Missing API key.")
 
     try:
         raw = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
 
-    # Extract fields from the request body
-    model: str = raw.get("model", "mistral-large-latest")
-    messages_raw: list[dict[str, Any]] = raw.get("messages", [])
+    provider = raw.get("provider", "mistral").lower()
     stream: bool = raw.get("stream", False)
-    temperature: Any = raw.get("temperature")
-    max_tokens: Any = raw.get("max_tokens")
-    tools_raw: Any = raw.get("tools")
-    tool_choice_raw = raw.get("tool_choice")
-    top_p: Any = raw.get("top_p")
-    stop: Any = raw.get("stop")
-    random_seed: Any = raw.get("random_seed")
-    response_format: Any = raw.get("response_format")
-    presence_penalty: Any = raw.get("presence_penalty")
-    frequency_penalty: Any = raw.get("frequency_penalty")
-    safe_prompt: Any = raw.get("safe_prompt")
 
-    # Build messages via TypedDicts
-    messages = _build_messages(messages_raw)
+    # --- OpenAI ---
+    if provider == "openai":
+        return await _proxy_openai_compat(_OPENAI_COMPAT_PROVIDERS["openai"], key, raw, stream)
 
-    # Build the kwargs dict that matches the SDK method signature
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-    }
+    # --- Groq ---
+    if provider == "groq":
+        return await _proxy_openai_compat(_OPENAI_COMPAT_PROVIDERS["groq"], key, raw, stream)
 
-    # Only pass non-None optional fields
-    for key, val in [
-        ("temperature", temperature),
-        ("max_tokens", max_tokens),
-        ("top_p", top_p),
-        ("stop", stop),
-        ("random_seed", random_seed),
-        ("presence_penalty", presence_penalty),
-        ("frequency_penalty", frequency_penalty),
-        ("safe_prompt", safe_prompt),
-        ("response_format", response_format),
-    ]:
-        if val is not None:
-            kwargs[key] = val
+    # --- Custom OpenAI-compatible endpoint ---
+    if provider == "custom":
+        return await _proxy_openai_compat(_openai_compat_chat_url(raw.get("base_url", "")), key, raw, stream)
 
-    # Tools
-    if tools_raw:
-        kwargs["tools"] = _build_tools(tools_raw)
-        kwargs["tool_choice"] = _build_tool_choice(tool_choice_raw) or "auto"
-    elif tool_choice_raw:
-        log.debug("Ignoring tool_choice without tools.")
+    # --- Anthropic ---
+    if provider == "anthropic":
+        return await _proxy_anthropic(key, raw, stream)
+
+    # --- Gemini ---
+    if provider == "gemini":
+        return await _proxy_gemini(key, raw, stream)
+
+    if provider != "mistral":
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    # --- Mistral (default) — use SDK for exact schema compatibility ---
+    client = _get_client(auth)
+    model: str = raw.get("model", "mistral-large-latest")
+    messages = _build_messages(raw.get("messages", []))
+    kwargs: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+    for k, v in [("temperature", raw.get("temperature")), ("max_tokens", raw.get("max_tokens")),
+                 ("top_p", raw.get("top_p")), ("stop", raw.get("stop")),
+                 ("random_seed", raw.get("random_seed")), ("safe_prompt", raw.get("safe_prompt"))]:
+        if v is not None:
+            kwargs[k] = v
+    if raw.get("tools"):
+        kwargs["tools"] = _build_tools(raw["tools"])
+        kwargs["tool_choice"] = _build_tool_choice(raw.get("tool_choice")) or "auto"
 
     if stream:
         from fastapi.responses import StreamingResponse as _SR
-        return _SR(
-            _sse_chunks(client, kwargs),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # Non-streaming
+        return _SR(_sse_chunks(client, kwargs), media_type="text/event-stream",
+                   headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
     result = await _non_stream_chat(client, kwargs)
     return JSONResponse(content=result)
 
@@ -489,6 +978,228 @@ async def _non_stream_chat(
             raise HTTPException(status_code=502, detail=str(exc))
 
     return _serialise(resp)
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/search  — DDG scrape, no API key required
+# ---------------------------------------------------------------------------
+
+_DDG_URL = "https://html.duckduckgo.com/html/"
+_BRAVE_URL = "https://search.brave.com/search"
+
+_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _parse_ddg_html(html: str, max_results: int) -> list[dict]:
+    """Parse DuckDuckGo HTML results page into structured dicts."""
+    if not _BS4_AVAILABLE:
+        # Fallback regex parser — works without bs4
+        results = []
+        # DDG HTML wraps each result in <div class="result">
+        blocks = re.findall(r'class="result__body".*?</div>', html, re.S)
+        for block in blocks[:max_results]:
+            title_m = re.search(r'class="result__a"[^>]*>(.*?)</a>', block, re.S)
+            url_m   = re.search(r'href="([^"]+)"', block)
+            snip_m  = re.search(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)', block, re.S)
+            if not title_m:
+                continue
+            title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip()
+            url   = url_m.group(1) if url_m else ''
+            snip  = re.sub(r'<[^>]+>', '', snip_m.group(1)).strip() if snip_m else ''
+            results.append({"title": title, "url": url, "snippet": snip})
+        return results
+
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for div in soup.select(".result__body")[:max_results]:
+        a    = div.select_one(".result__a")
+        snip = div.select_one(".result__snippet")
+        if not a:
+            continue
+        href = a.get("href", "")
+        # DDG wraps URLs — unwrap if needed
+        if href.startswith("/"):
+            m = re.search(r'uddg=([^&]+)', href)
+            if m:
+                from urllib.parse import unquote
+                href = unquote(m.group(1))
+        results.append({
+            "title":   a.get_text(strip=True),
+            "url":     href,
+            "snippet": snip.get_text(strip=True) if snip else "",
+        })
+    return results
+
+
+@app.get("/v1/search")
+async def search(q: str, max: int = 8):
+    """
+    Scrape DuckDuckGo HTML (no API key, no rate limits for personal use).
+    Returns JSON array of {title, url, snippet}.
+    """
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q is required")
+
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="httpx not installed. Run: pip install httpx beautifulsoup4"
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            headers=_SEARCH_HEADERS,
+            follow_redirects=True,
+            timeout=12.0,
+            verify=False,
+        ) as client:
+            resp = await client.post(_DDG_URL, data={"q": q, "kl": "us-en"})
+            resp.raise_for_status()
+
+        results = _parse_ddg_html(resp.text, max_results=max)
+        log.info("search %r → %d results", q, len(results))
+        return JSONResponse({"query": q, "results": results})
+
+    except httpx.HTTPStatusError as e:
+        log.warning("DDG search HTTP error %s for %r", e.response.status_code, q)
+        raise HTTPException(status_code=502, detail=f"Search upstream error: {e.response.status_code}")
+    except Exception as e:
+        log.exception("Search error for %r", q)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/extract  — fetch URL and return readable text
+# ---------------------------------------------------------------------------
+
+def _extract_text(html: str, max_chars: int = 12000) -> str:
+    """Strip HTML to readable prose. Uses bs4 if available, regex fallback."""
+    # Remove script/style blocks first
+    html = re.sub(r'<(script|style|noscript|header|footer|nav)[^>]*>.*?</\1>', '', html, flags=re.S | re.I)
+
+    if _BS4_AVAILABLE:
+        soup = BeautifulSoup(html, "html.parser")
+        # Prefer <article> or <main> if present
+        body = soup.find("article") or soup.find("main") or soup.body or soup
+        # Get text with newlines for block elements
+        lines = []
+        for el in body.descendants:
+            if hasattr(el, 'name'):
+                if el.name in ('h1','h2','h3','h4','h5','h6'):
+                    lines.append('\n## ' + el.get_text(strip=True))
+                elif el.name in ('p', 'li'):
+                    t = el.get_text(strip=True)
+                    if t:
+                        lines.append(t)
+        text = '\n'.join(lines)
+    else:
+        # Regex fallback
+        text = re.sub(r'<[^>]+>', ' ', html)
+        text = re.sub(r'&[a-z#0-9]+;', ' ', text)
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # Collapse excessive whitespace and trim
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text[:max_chars]
+
+
+@app.get("/v1/extract")
+async def extract(url: str, max_chars: int = 12000):
+    """
+    Fetch a URL and return clean readable text — strips nav, scripts, ads.
+    Used by the agent's extract_from_url tool for research workflows.
+    """
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="httpx not installed. Run: pip install httpx beautifulsoup4"
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            headers=_SEARCH_HEADERS,
+            follow_redirects=True,
+            timeout=15.0,
+            verify=False,
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            raise HTTPException(status_code=415, detail=f"Unsupported content type: {content_type}")
+
+        text = _extract_text(resp.text, max_chars=max_chars)
+        log.info("extract %r → %d chars", url, len(text))
+        return JSONResponse({"url": url, "text": text, "chars": len(text)})
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Upstream HTTP {e.response.status_code}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("Extract error for %r", url)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/fetch  — general HTTP proxy for fetch_request tool
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/fetch")
+async def proxy_fetch(request: Request):
+    """
+    Proxy arbitrary HTTP requests server-side, bypassing browser CORS.
+    Body: { url, method?, headers?, body? }
+    """
+    if not _HTTPX_AVAILABLE:
+        raise HTTPException(status_code=501, detail="httpx not installed.")
+
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    url     = raw.get("url", "").strip()
+    method  = raw.get("method", "GET").upper()
+    headers = {**_SEARCH_HEADERS, **raw.get("headers", {})}
+    body    = raw.get("body")
+
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=20.0, verify=False
+        ) as client:
+            req_kwargs = {"headers": headers}
+            if body:
+                req_kwargs["content"] = body.encode() if isinstance(body, str) else body
+            resp = await client.request(method, url, **req_kwargs)
+
+        # Return raw text truncated to 12k chars — same as extract
+        content_type = resp.headers.get("content-type", "")
+        text = resp.text[:12000]
+        return JSONResponse({
+            "status": resp.status_code,
+            "content_type": content_type,
+            "body": text,
+        })
+    except Exception as e:
+        log.exception("Proxy fetch error for %r", url)
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,24 @@
+{
+  "name": "aria",
+  "version": "1.0.0",
+  "description": "**Autonomous Reasoning & Implementation Agent** — a browser-native AI coding collaborator powered by the Mistral API.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ma73rial/Aria.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ma73rial/Aria/issues"
+  },
+  "homepage": "https://github.com/ma73rial/Aria#readme",
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

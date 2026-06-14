@@ -126,6 +126,8 @@
       <div class="sb-footer-model" id="sb-footer-model"></div>
       <span class="sb-footer-sep">|</span>
       <div class="sb-footer-ctx" id="sb-footer-ctx">CTX 0%</div>
+      <span class="sb-footer-sep" id="sb-footer-tok-sep" style="display:none">|</span>
+      <div id="sb-footer-tokens" style="font-size:9px;color:var(--txt3);font-family:var(--mono);cursor:default;"></div>
       <div style="flex:1"></div>
       <button class="ibtn" id="settings-btn" title="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -155,9 +157,9 @@
           <div class="wlc-logo">ARIA</div>
           <p class="wlc-sub">Autonomous Reasoning &amp; Implementation Agent.<br>Browser-native AI coding collaborator.</p>
           <div class="wlc-actions">
-            <button class="act-pill primary" onclick="document.getElementById('open-folder-btn').click()">Open Workspace</button>
-            <button class="act-pill" onclick="import('./js/fs.js').then(m=>m.initIDBSession())">New Session</button>
-            <button class="act-pill" onclick="document.getElementById('prompt-inp').focus()">Chat Without FS</button>
+            <button class="act-pill primary" id="wlc-open-folder">Open Workspace</button>
+            <button class="act-pill" id="wlc-new-session">New Session</button>
+            <button class="act-pill" id="wlc-chat-only">Chat Without FS</button>
           </div>
         </div>
       </div>
@@ -195,6 +197,51 @@
 
 <div id="toast"></div>
 
+<div id="app-lock" class="app-lock hidden">
+  <div class="app-lock-card">
+    <div class="app-lock-title">API key required</div>
+    <div class="app-lock-sub">Add a provider key in setup before sending messages.</div>
+    <button class="btn prim" id="app-lock-setup">Open Setup</button>
+  </div>
+</div>
+
+<div id="setup-modal" class="modal-backdrop hidden">
+  <div class="setup-card">
+    <div class="setup-logo">ARIA</div>
+    <div class="setup-title">Provider Setup</div>
+    <div class="setup-subtitle">Choose a provider and save the first API key for this browser.</div>
+    <div class="setup-form">
+      <div class="inp-grp">
+        <label>Provider</label>
+        <select id="setup-provider" style="width:100%;"></select>
+      </div>
+      <div class="inp-grp hidden" id="setup-custom-base-wrap">
+        <label>Base URL</label>
+        <input type="url" id="setup-custom-base" placeholder="https://api.example.com/v1" style="width:100%;">
+      </div>
+      <div class="inp-grp">
+        <label>API Key</label>
+        <div class="setup-input-wrap">
+          <input type="password" id="setup-key" placeholder="sk-...">
+          <button class="setup-eye" id="setup-eye">
+            <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+              <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3"/>
+              <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div id="setup-error" class="setup-error hidden"></div>
+      <div class="setup-actions">
+        <button class="btn prim" id="setup-save" disabled>Save Key</button>
+      </div>
+      <div class="setup-foot">
+        <button class="setup-link" id="setup-no-key">Continue locked</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Hidden action triggers (referenced by welcome screen and events.js) -->
 <button id="open-folder-btn" hidden></button>
 <button id="new-idb-btn" hidden></button>
@@ -211,38 +258,118 @@
       </button>
     </div>
     <div class="modal-body">
-      <div class="inp-grp">
-        <label>Mistral API Key</label>
-        <div style="position:relative;">
-          <input type="password" id="api-key" placeholder="sk-..." style="width:100%;padding-right:30px;">
-          <button class="setup-eye" id="settings-eye" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);">
-            <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
-              <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3"/>
-              <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
-            </svg>
-          </button>
+      <div class="inp-row">
+        <div class="inp-grp" style="flex:1;">
+          <label>Provider</label>
+          <select id="provider-sel" style="width:100%;"></select>
         </div>
-        <div id="key-status" style="font-size:10px;color:var(--txt3);margin-top:4px;"></div>
+        <div class="inp-grp" style="flex:2;">
+          <label>API Key</label>
+          <div style="position:relative;">
+            <input type="password" id="api-key" placeholder="sk-..." style="width:100%;padding-right:30px;">
+            <button class="setup-eye" id="settings-eye" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);">
+              <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
+                <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3"/>
+                <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
+              </svg>
+            </button>
+          </div>
+          <div id="key-status" style="font-size:10px;color:var(--txt3);margin-top:4px;"></div>
+        </div>
+      </div>
+      <div class="inp-row hidden" id="custom-provider-row">
+        <div class="inp-grp" style="flex:1;">
+          <label>Custom Base URL</label>
+          <input type="url" id="custom-provider-base" placeholder="https://api.example.com/v1" style="width:100%;">
+        </div>
       </div>
       <div class="inp-row">
         <div class="inp-grp" style="flex:1;">
           <label>Model</label>
-          <select id="model-sel" style="width:100%;">
-            <option value="mistral-large-latest">Mistral Large</option>
-            <option value="codestral-latest">Codestral</option>
-            <option value="mistral-medium-latest">Mistral Medium</option>
-            <option value="mistral-small-latest">Mistral Small</option>
-            <option value="open-mistral-nemo">Mistral Nemo</option>
-          </select>
+          <select id="model-sel" style="width:100%;"></select>
         </div>
+        <div class="inp-grp" style="flex:1;">
+          <label>Custom Model</label>
+          <input type="text" id="model-freeform" placeholder="model-id" style="width:100%;">
+        </div>
+      </div>
+      <div class="inp-row" style="margin-top: 20px;">
+        <label>API Keys</label>
+        <div id="api-key-management">
+          <div id="api-key-list">
+            <!-- API keys will be listed here -->
+          </div>
+          <button class="btn sm" id="add-api-key-btn">Add API Key</button>
+          <div id="add-api-key-form" class="hidden" style="margin-top: 10px; border: 1px solid var(--brdr); padding: 10px; border-radius: var(--br); background: var(--bg2);">
+            <h4>Add API Key</h4>
+            <div class="inp-grp">
+              <label>Provider</label>
+              <select id="new-api-key-provider-sel" style="width:100%;">
+                <option value="mistral">Mistral AI</option>
+                <option value="openai">OpenAI</option>
+                <option value="groq">Groq</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="gemini">Google Gemini</option>
+              </select>
+            </div>
+            <div class="inp-grp">
+              <label>API Key</label>
+              <input type="password" id="new-api-key-input" placeholder="sk-..." style="width:100%;">
+            </div>
+            <div class="inp-grp">
+              <label>Key Name (Optional)</label>
+              <input type="text" id="new-api-key-name" placeholder="My Mistral Key" style="width:100%;">
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap: 5px; margin-top: 10px;">
+              <button class="btn sm" id="cancel-add-api-key">Cancel</button>
+              <button class="btn sm prim" id="save-new-api-key">Save API Key</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="inp-row">
         <div class="inp-grp" style="flex:1;">
           <label>Temp</label>
           <input type="number" id="temp-inp" value="0.7" min="0" max="2" step="0.05" style="width:100%;">
         </div>
+        <div class="inp-grp" style="flex:1;">
+          <label>Max Tokens</label>
+          <input type="number" id="maxtok-inp" value="4096" min="256" max="32768" step="256" style="width:100%;">
+        </div>
       </div>
-      <div class="inp-grp">
-        <label>Max Tokens</label>
-        <input type="number" id="maxtok-inp" value="4096" min="256" max="32768" step="256" style="width:100%;">
+      <div class="inp-row" style="margin-top: 20px;">
+        <label>Custom Models</label>
+        <div id="custom-model-management">
+          <div id="custom-model-list">
+            <!-- Custom models will be listed here -->
+          </div>
+          <button class="btn sm" id="add-custom-model-btn">Add Custom Model</button>
+          <div id="add-custom-model-form" class="hidden" style="margin-top: 10px; border: 1px solid var(--brdr); padding: 10px; border-radius: var(--br); background: var(--bg2);">
+            <h4>Add Custom Model</h4>
+            <div class="inp-grp">
+              <label>Model Name</label>
+              <input type="text" id="new-custom-model-name" placeholder="My Custom Model" style="width:100%;">
+            </div>
+            <div class="inp-grp">
+              <label>Provider</label>
+              <select id="new-custom-model-provider-sel" style="width:100%;">
+                <option value="mistral">Mistral AI</option>
+                <option value="openai">OpenAI</option>
+                <option value="groq">Groq</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="gemini">Google Gemini</option>
+              </select>
+            </div>
+            <div class="inp-grp">
+              <label>Notes (Optional)</label>
+              <input type="text" id="new-custom-model-base" placeholder="Optional local label" style="width:100%;">
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap: 5px; margin-top: 10px;">
+              <button class="btn sm" id="cancel-add-custom-model">Cancel</button>
+              <button class="btn sm prim" id="save-new-custom-model">Save Custom Model</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="modal-ft">

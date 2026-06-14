@@ -726,6 +726,81 @@ export const TOOLS = [
   {
     "type": "function",
     "function": {
+      "name": "web_search",
+      "description": "Search the web via the local server proxy (DuckDuckGo, no API key needed). Returns titles, URLs, and snippets. Use for research, current events, documentation lookup, or anything requiring up-to-date information. Chain with extract_from_url to read full content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max results to return (default 8, max 20)"
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "extract_from_url",
+      "description": "Fetch a URL and extract clean readable text, stripping navigation, ads, and scripts. Use after web_search to read the full content of a promising result. Also works on documentation pages, articles, and GitHub READMEs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL to fetch and extract text from"
+          },
+          "max_chars": {
+            "type": "number",
+            "description": "Max characters to return (default 12000)"
+          }
+        },
+        "required": ["url"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_in_files",
+      "description": "Search for a pattern (string or regex) across files in the workspace. Returns matching lines with file path and line number. Use instead of reading every file one-by-one when looking for usages, definitions, or strings.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Search string or JavaScript regex pattern (e.g. 'myFunction' or 'function\\s+myFunc')"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search (default: workspace root). Use '.' for root."
+          },
+          "file_glob": {
+            "type": "string",
+            "description": "Optional file extension filter, e.g. '.js' or '.py'. Matches any file whose name includes this string."
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max matching lines to return (default 50)"
+          },
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "Case-sensitive search (default false)"
+          }
+        },
+        "required": ["pattern"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "git_status",
       "description": "Get git branch (machine mode only).",
       "parameters": {

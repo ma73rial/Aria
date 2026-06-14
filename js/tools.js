@@ -9,7 +9,7 @@ import { fsRead, fsWrite, fsList, fsMkdir, fsDelete, fsRename,
          fsReadRange, initIDBSession, switchWorkspace,
          deleteSession, refreshSessions, machOpen } from './fs.js';
 import { diffLines } from './diff.js';
-import { apiChat } from './api.js';
+import { apiChat, streamChatWithRetry } from './api.js';
 import { spawnSubagent } from './subagents.js';
 import { createArtifact } from './artifacts.js';
 import { recordPendingDiff } from './review.js';
@@ -17,88 +17,140 @@ import { makeClarifyWidget, makeSQWidget } from './widgets.js';
 
 export { TOOLS };
 
+// Pending user-input resolvers (approval widgets, clarify, simple_question).
+// When the agent run is aborted (stop button), these are resolved/rejected
+// so the run-loop doesn't hang forever on a widget nobody can answer.
+const pendingResolvers = new Set();
+Bus.on('agent:abort', () => {
+  for (const fn of pendingResolvers) {
+    try { fn(); } catch {}
+  }
+  pendingResolvers.clear();
+});
+
 /**
  * In edit mode, show diff and wait for user approval.
+ * Uses the same .diff-blk styling as the inline diff renderer in ui.js,
+ * with Accept/Reject controls appended below the diff body.
  * Returns a Promise that resolves to true (approved) or false (rejected).
  */
 function waitForApproval(path, diff, isNew) {
   return new Promise((resolve) => {
-    const widget = document.createElement('div');
-    widget.className = 'approval-widget';
-    widget.style.cssText = 'background:#1e1e1e;border:2px solid #4a4a4a;border-radius:8px;padding:12px;margin:8px 0;';
-    
-    const header = document.createElement('div');
-    header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;';
-    
-    const title = document.createElement('div');
-    title.style.cssText = 'color:#00ff00;font-weight:bold;font-size:14px;';
-    title.textContent = `${isNew ? 'Create' : 'Edit'}: ${path}`;
-    
-    const stats = document.createElement('div');
-    stats.style.cssText = 'color:#888;font-size:12px;';
-    stats.textContent = `+${diff.stats.add} -${diff.stats.del}`;
-    
-    header.append(title, stats);
-    
-    const diffView = document.createElement('div');
-    diffView.style.cssText = 'background:#0d0d0d;border:1px solid #333;border-radius:4px;padding:8px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.4;margin-bottom:12px;';
-    
-    // Render diff lines
-    for (const line of diff.lines) {
-      const lineEl = document.createElement('div');
-      if (line.t === 'add') {
-        lineEl.style.color = '#2ea043';
-        lineEl.textContent = '+ ' + line.s;
-      } else if (line.t === 'del') {
-        lineEl.style.color = '#f85149';
-        lineEl.textContent = '- ' + line.s;
-      } else if (line.t === 'ctx') {
-        lineEl.style.color = '#888';
-        lineEl.textContent = '  ' + line.s;
-      } else {
-        lineEl.style.color = '#666';
-        lineEl.textContent = '...';
-      }
-      diffView.appendChild(lineEl);
+    const settle = (val) => {
+      pendingResolvers.delete(abortHandler);
+      resolve(val);
+    };
+    const abortHandler = () => {
+      blk.querySelectorAll('button').forEach(b => b.disabled = true);
+      blk.style.opacity = '.4';
+      settle(false);
+    };
+    pendingResolvers.add(abortHandler);
+
+    const blk = document.createElement('div');
+    blk.className = 'diff-blk approval-widget';
+
+    const fname = path.split('/').pop();
+    const hd = document.createElement('div');
+    hd.className = 'diff-hd';
+
+    const left = document.createElement('span');
+    left.className = 'diff-fn';
+    left.textContent = (isNew ? 'Create: ' : 'Edit: ') + fname;
+
+    const right = document.createElement('span');
+    right.className = 'diff-st';
+    if (isNew) {
+      const nb = document.createElement('span');
+      nb.style.color = 'var(--teal)';
+      nb.textContent = 'new ';
+      right.appendChild(nb);
     }
-    
-    const buttons = document.createElement('div');
-    buttons.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-    
+    const add = document.createElement('span');
+    add.className = 'diff-add-c';
+    add.textContent = '+' + diff.stats.add + ' ';
+    const del = document.createElement('span');
+    del.className = 'diff-del-c';
+    del.textContent = '-' + diff.stats.del;
+    right.append(add, del);
+
+    hd.append(left, right);
+
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:3px 0;max-height:240px;overflow-y:auto;';
+    for (const line of diff.lines) {
+      const el = document.createElement('div');
+      if (line.t === 'gap') {
+        el.className = 'diff-line gap';
+        el.innerHTML = '<span class="diff-pfx">\u2026</span><span style="color:var(--txt3);font-style:italic">unchanged</span>';
+      } else {
+        const cls = { add: 'add', del: 'del', ctx: 'ctx' }[line.t] || 'ctx';
+        const pfx = { add: '+', del: '-', ctx: ' ' }[line.t] || ' ';
+        el.className = 'diff-line ' + cls;
+        const pfxSpan = document.createElement('span');
+        pfxSpan.className = 'diff-pfx';
+        pfxSpan.textContent = pfx;
+        el.appendChild(pfxSpan);
+        el.appendChild(document.createTextNode(line.s || ''));
+      }
+      body.appendChild(el);
+    }
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:6px;justify-content:flex-end;padding:8px 10px;border-top:1px solid var(--border);';
+
     const rejectBtn = document.createElement('button');
+    rejectBtn.className = 'btn sm';
     rejectBtn.textContent = 'Reject';
-    rejectBtn.style.cssText = 'padding:6px 16px;background:#f85149;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;';
+    rejectBtn.style.borderColor = 'rgba(245,83,79,.4)';
+    rejectBtn.style.color = 'var(--red)';
     rejectBtn.onclick = () => {
-      widget.remove();
-      resolve(false);
+      actions.querySelectorAll('button').forEach(b => b.disabled = true);
+      blk.style.opacity = '.55';
+      settle(false);
     };
-    
+
     const acceptBtn = document.createElement('button');
+    acceptBtn.className = 'btn sm prim';
     acceptBtn.textContent = 'Accept';
-    acceptBtn.style.cssText = 'padding:6px 16px;background:#2ea043;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;';
     acceptBtn.onclick = () => {
-      widget.remove();
-      resolve(true);
+      actions.querySelectorAll('button').forEach(b => b.disabled = true);
+      blk.style.opacity = '.55';
+      settle(true);
     };
-    
-    buttons.append(rejectBtn, acceptBtn);
-    widget.append(header, diffView, buttons);
-    
+
+    actions.append(rejectBtn, acceptBtn);
+    blk.append(hd, body, actions);
+
     // Append to the current agent turn (where tool outputs live)
-    const turn = document.querySelector('.msg-agent:last-child') 
-              || document.getElementById('msgs') 
+    const turn = document.querySelector('.msg-agent:last-child')
+              || document.getElementById('msgs')
               || document.body;
-    turn.appendChild(widget);
-    widget.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    turn.appendChild(blk);
+    blk.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 }
 
 export async function execTool(name, args) {
   switch (name) {
 
-    case 'suggest_mode':
-      return { success: true, _ui: 'suggest_mode', mode: args.mode, reason: args.reason,
-        message: `Suggested: ${args.mode} — ${args.reason}` };
+    case 'suggest_mode': {
+      // In YOLO, apply immediately without blocking — the agent is
+      // operating autonomously and shouldn't stall on its own suggestion.
+      if (S.mode === 'yolo') {
+        return { success: true, _ui: 'suggest_mode', mode: args.mode, reason: args.reason, blocking: false,
+          message: `Suggested: ${args.mode} — ${args.reason}` };
+      }
+      // In PLAN/EDIT, block until the user accepts or skips. This prevents
+      // the agent from assuming a mode switch happened when it didn't —
+      // it must wait for the actual outcome before continuing.
+      return new Promise(resolve => {
+        const settle = (val) => { pendingResolvers.delete(abortHandler); resolve(val); };
+        const abortHandler = () => settle({ success: false, message: 'Cancelled by user.', cancelled: true, _ui: 'suggest_mode', mode: args.mode, reason: args.reason, resolved: 'cancelled' });
+        pendingResolvers.add(abortHandler);
+        Bus.emit('widget:suggest_mode', { mode: args.mode, reason: args.reason, settle });
+      });
+    }
 
     case 'init_filesystem': {
       if (args.type === 'machine') {
@@ -251,6 +303,108 @@ export async function execTool(name, args) {
       return { success: true, message: 'Created directory: ' + args.path };
     }
 
+    case 'web_search': {
+      try {
+        const max = args.max_results || 8;
+        const resp = await fetch(`/v1/search?q=${encodeURIComponent(args.query)}&max=${max}`);
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          return { success: false, message: err.detail || `Search failed: HTTP ${resp.status}` };
+        }
+        const data = await resp.json();
+        const results = data.results || [];
+        const formatted = results.map((r, i) =>
+          `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.snippet}`
+        ).join('\n\n');
+        return {
+          success: true,
+          results,
+          _ui: 'search',
+          message: results.length
+            ? `Found ${results.length} results for "${args.query}":\n\n${formatted}`
+            : `No results found for "${args.query}"`,
+        };
+      } catch (e) {
+        return { success: false, message: 'Search error: ' + e.message };
+      }
+    }
+
+    case 'extract_from_url': {
+      try {
+        const max = args.max_chars || 12000;
+        const resp = await fetch(`/v1/extract?url=${encodeURIComponent(args.url)}&max_chars=${max}`);
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          return { success: false, message: err.detail || `Extract failed: HTTP ${resp.status}` };
+        }
+        const data = await resp.json();
+        return {
+          success: true,
+          text: data.text,
+          chars: data.chars,
+          url: args.url,
+          message: data.text,
+        };
+      } catch (e) {
+        return { success: false, message: 'Extract error: ' + e.message };
+      }
+    }
+
+    case 'search_in_files': {
+      if (!S.fsMode) return { success: false, message: 'No workspace open.' };
+      const maxResults = args.max_results || 50;
+      const caseSensitive = args.case_sensitive || false;
+      let rx;
+      try {
+        rx = new RegExp(args.pattern, caseSensitive ? 'g' : 'gi');
+      } catch {
+        // If the pattern isn't valid regex, treat it as a literal string.
+        rx = new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'g' : 'gi');
+      }
+
+      const matches = [];
+      const searchDir = args.path || S.cwd;
+      const fileGlob = (args.file_glob || '').toLowerCase();
+
+      // Recursive file walker using fsList.
+      const walk = async (dir) => {
+        if (matches.length >= maxResults) return;
+        let items;
+        try { items = await fsList(dir); } catch { return; }
+        for (const it of items) {
+          if (matches.length >= maxResults) break;
+          const fullPath = S.fsMode === 'idb' ? dir + it.name : it.path || (dir.replace(/\/$/, '') + '/' + it.name);
+          if (it.type === 'dir') {
+            if (it.name === 'node_modules' || it.name === '.git') continue;
+            await walk(fullPath + '/');
+          } else {
+            if (fileGlob && !it.name.toLowerCase().includes(fileGlob)) continue;
+            try {
+              const content = await fsRead(fullPath);
+              const lines = content.split('\n');
+              lines.forEach((line, i) => {
+                if (matches.length >= maxResults) return;
+                if (rx.test(line)) {
+                  rx.lastIndex = 0; // reset stateful regex
+                  matches.push({ file: fullPath, line: i + 1, text: line.trim().slice(0, 200) });
+                }
+                rx.lastIndex = 0;
+              });
+            } catch { /* unreadable — skip */ }
+          }
+        }
+      };
+
+      await walk(searchDir.endsWith('/') ? searchDir : searchDir + '/');
+
+      if (!matches.length) {
+        return { success: true, matches: [], message: `No matches for "${args.pattern}"` };
+      }
+      const formatted = matches.map(m => `${m.file}:${m.line}  ${m.text}`).join('\n');
+      return { success: true, matches, truncated: matches.length >= maxResults,
+        message: `${matches.length}${matches.length >= maxResults ? '+' : ''} match${matches.length === 1 ? '' : 'es'} for "${args.pattern}":\n\n${formatted}` };
+    }
+
     case 'git_status': {
       if (S.fsMode !== 'machine') return { success: false, message: 'Git only in machine mode.' };
       const { machGit } = await import('./fs.js');
@@ -299,25 +453,59 @@ export async function execTool(name, args) {
       return { success: true, _ui: 'markdown', content: args.content, title: args.title };
 
     case 'run_javascript': {
-      const logs = [];
-      const orig = console.log;
-      console.log = (...a) => logs.push(a.map(x =>
-        typeof x === 'object' ? JSON.stringify(x, null, 2) : String(x)).join(' '));
-      let out = '', err = '';
-      try {
-        // Use Function constructor to isolate scope (prevents access to S, fsWrite, localStorage, etc.)
-        const fn = new Function('console', `
-          "use strict";
-          ${args.code}
-        `);
-        const v = fn({ log: (...a) => logs.push(a.map(x =>
-          typeof x === 'object' ? JSON.stringify(x, null, 2) : String(x)).join(' ')) });
-        if (v !== undefined) logs.push(String(v));
-      } catch (e) { err = e.message; }
-      finally { console.log = orig; }
-      out = logs.join('\n');
-      return { success: !err, output: out, error: err, _ui: 'js',
-        message: err ? 'Error: ' + err : (out || '(no output)') };
+      // Run inside a sandboxed iframe so the code can't access S, Bus,
+      // localStorage, DOM, or any other page globals. Results come back
+      // via postMessage.
+      return new Promise(resolve => {
+        const iframe = document.createElement('iframe');
+        iframe.sandbox = 'allow-scripts';
+        iframe.style.display = 'none';
+        document.body.appendChild(iframe);
+
+        const logs = [];
+        const tid = uid();
+        let settled = false;
+
+        const cleanup = () => {
+          window.removeEventListener('message', handler);
+          iframe.remove();
+        };
+        const settle = (out, err) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          clearTimeout(timer);
+          resolve({ success: !err, output: out, error: err, _ui: 'js',
+            message: err ? 'Error: ' + err : (out || '(no output)') });
+        };
+
+        // 5s timeout — prevents infinite loops from hanging the agent.
+        const timer = setTimeout(() => settle('', 'Execution timed out (5s)'), 5000);
+
+        const handler = (e) => {
+          if (!e.data || e.data._ariaId !== tid) return;
+          settle(e.data.output || '', e.data.error || '');
+        };
+        window.addEventListener('message', handler);
+
+        const src = `
+          <script>
+          const _logs = [];
+          const _con = { log: (...a) => _logs.push(a.map(x => typeof x === 'object' ? JSON.stringify(x, null, 2) : String(x)).join(' ')),
+                         error: (...a) => _logs.push('[err] ' + a.join(' ')),
+                         warn: (...a) => _logs.push('[warn] ' + a.join(' ')) };
+          try {
+            (function(console) {
+              "use strict";
+              ${args.code.replace(/<\/script>/gi, '<\\/script>')}
+            })(_con);
+            parent.postMessage({ _ariaId: ${JSON.stringify(tid)}, output: _logs.join('\\n'), error: '' }, '*');
+          } catch(e) {
+            parent.postMessage({ _ariaId: ${JSON.stringify(tid)}, output: _logs.join('\\n'), error: e.message }, '*');
+          }
+          <\/script>`;
+        iframe.srcdoc = src;
+      });
     }
 
     case 'display_html':
@@ -337,7 +525,13 @@ export async function execTool(name, args) {
 
     case 'search_conversations': {
       const q = args.query.toLowerCase();
-      const r = S.convs.filter(c => (c.title + JSON.stringify(c.msgs)).toLowerCase().includes(q)).slice(0, 5);
+      // Strip base64 image data from messages before stringifying for search —
+      // it's huge, never matches text queries, and chokes the string ops.
+      const searchable = (msgs) => JSON.stringify(msgs.map(m => {
+        if (!Array.isArray(m.content)) return m;
+        return { ...m, content: m.content.map(b => b.type === 'image_url' ? { type: 'image_url', image_url: '[image]' } : b) };
+      }));
+      const r = S.convs.filter(c => (c.title + searchable(c.msgs || [])).toLowerCase().includes(q)).slice(0, 5);
       return { success: true, results: r,
         message: r.length ? r.map(c => `"${c.title}"`).join(', ') : 'No matches.' };
     }
@@ -364,14 +558,17 @@ raw.textContent=${JSON.stringify(args.content)};window.print();<\/script></body>
 
     case 'clarify': {
       return new Promise(resolve => {
-        const w = makeClarifyWidget(args.question, ans => resolve({ success: true, answer: ans }));
+        const settle = (val) => { pendingResolvers.delete(abortHandler); resolve(val); };
+        const abortHandler = () => settle({ success: false, message: 'Cancelled by user.', cancelled: true });
+        pendingResolvers.add(abortHandler);
+        const w = makeClarifyWidget(args.question, ans => settle({ success: true, answer: ans }));
         Bus.emit('widget:append', w);
         if (S.mode === 'yolo') {
           setTimeout(() => {
             const def = args.default_answer || 'Continue with best default.';
             const input = w.querySelector('.clr-inp');
             if (input) { input.value = def; input.disabled = true; }
-            resolve({ success: true, answer: def, auto: true });
+            settle({ success: true, answer: def, auto: true });
           }, 30000);
         }
       });
@@ -379,10 +576,14 @@ raw.textContent=${JSON.stringify(args.content)};window.print();<\/script></body>
 
     case 'simple_question': {
       return new Promise(resolve => {
-        const w = makeSQWidget(args.question, args.options, ans => resolve({ success: true, answer: ans }));
+        const settle = (val) => { pendingResolvers.delete(abortHandler); resolve(val); };
+        const abortHandler = () => settle({ success: false, message: 'Cancelled by user.', cancelled: true });
+        pendingResolvers.add(abortHandler);
+        const w = makeSQWidget(args.question, args.options, ans => settle({ success: true, answer: ans }));
         Bus.emit('widget:append', w);
         if (S.mode === 'yolo') {
-          setTimeout(() => resolve({ success: true, answer: args.options[args.default_index || 0], auto: true }), 30000);
+          const di = Math.max(0, Math.min((args.default_index ?? 0), (args.options?.length ?? 1) - 1));
+          setTimeout(() => settle({ success: true, answer: args.options[di], auto: true }), 30000);
         }
       });
     }

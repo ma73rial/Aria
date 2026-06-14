@@ -15,8 +15,24 @@ export const esc = t => String(t ?? '')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
 
-// Rough token estimate (chars/3.8). Good enough for progress bar.
-export const est = s => Math.ceil((typeof s === 'string' ? s : JSON.stringify(s)).length / 3.8);
+// Rough token estimate (chars/3.8). Strips base64 image data before estimating
+// to avoid inflating the count from multimodal messages (base64 at ~1.3× the
+// image size would immediately blow the context % way past real usage).
+export const est = s => {
+  if (typeof s !== 'string') {
+    if (Array.isArray(s)) {
+      // Multimodal content array — sum text blocks only, add a fixed cost
+      // per image block (~1000 tokens as a rough vision estimate).
+      return s.reduce((acc, part) => {
+        if (part?.type === 'text') return acc + Math.ceil((part.text || '').length / 3.8);
+        if (part?.type === 'image_url') return acc + 1000; // vision token budget
+        return acc;
+      }, 0);
+    }
+    return Math.ceil(JSON.stringify(s).length / 3.8);
+  }
+  return Math.ceil(s.length / 3.8);
+};
 
 export function fmtEl(ms) {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
