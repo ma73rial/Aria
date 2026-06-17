@@ -22,13 +22,43 @@ export function initEvents() {
   const chat = document.getElementById('chat');
 
   const toggleSidebar = () => {
-    document.getElementById('sidebar').classList.toggle('hide');
-    document.getElementById('main').classList.toggle('sb-open');
+    const sb = document.getElementById('sidebar');
+    const main = document.getElementById('main');
+    const backdrop = document.getElementById('sb-backdrop');
+    const isMobile = window.innerWidth <= 600;
+    const willOpen = sb.classList.contains('hide');
+    sb.classList.toggle('hide');
+    main.classList.toggle('sb-open');
+    if (isMobile && backdrop) {
+      if (willOpen) {
+        document.body.classList.add('sb-drawer-open');
+        backdrop.classList.add('visible');
+      } else {
+        document.body.classList.remove('sb-drawer-open');
+        backdrop.classList.remove('visible');
+      }
+    }
   };
+
+  // Close drawer when backdrop is tapped
+  document.getElementById('sb-backdrop')?.addEventListener('click', () => {
+    const sb = document.getElementById('sidebar');
+    const main = document.getElementById('main');
+    const backdrop = document.getElementById('sb-backdrop');
+    if (sb && !sb.classList.contains('hide')) {
+      sb.classList.add('hide');
+      main?.classList.remove('sb-open');
+      document.body.classList.remove('sb-drawer-open');
+      backdrop?.classList.remove('visible');
+    }
+  });
+
   document.getElementById('toggle-sb').onclick = toggleSidebar;
   document.getElementById('close-sb').onclick = () => {
     document.getElementById('sidebar').classList.add('hide');
     document.getElementById('main').classList.remove('sb-open');
+    document.body.classList.remove('sb-drawer-open');
+    document.getElementById('sb-backdrop')?.classList.remove('visible');
   };
 
   // ── Slash command preview ─────────────────────────────────
@@ -142,50 +172,6 @@ export function initEvents() {
     buildSlashPopup(matches);
   }
 
-  // Augment the existing oninput handler.
-  const _origOninput = inp.oninput;
-  inp.oninput = (e) => {
-    if (_origOninput) _origOninput.call(inp, e);
-    updateSlashPopup();
-  };
-
-  // Intercept arrow keys and Tab inside the popup.
-  const _origOnkeydown = inp.onkeydown;
-  inp.onkeydown = (e) => {
-    if (slashPopup) {
-      const rows = slashPopup.querySelectorAll('.slash-row');
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashActive((slashActive + 1) % rows.length);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSlashActive((slashActive - 1 + rows.length) % rows.length);
-        return;
-      }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && slashActive >= 0)) {
-        const match = SLASH_COMMANDS.filter(c => {
-          const partial = inp.value.slice(1).toLowerCase();
-          return c.cmd.startsWith(partial);
-        })[slashActive];
-        if (match) {
-          e.preventDefault();
-          applySlashCompletion(match);
-          return;
-        }
-      }
-      if (e.key === 'Escape') {
-        destroySlashPopup();
-        return;
-      }
-    }
-    if (_origOnkeydown) _origOnkeydown.call(inp, e);
-  };
-
-  // Dismiss popup when focus leaves the input.
-  inp.addEventListener('blur', () => setTimeout(destroySlashPopup, 150));
-
   // Send / stop.
   const doSend = () => {
     if (S.running) {
@@ -200,7 +186,6 @@ export function initEvents() {
     if (!t) return;
 
     // ── Slash commands ────────────────────────────────────────
-    // Handled client-side before the message reaches the model.
     if (t.startsWith('/')) {
       const [cmd, ...rest] = t.slice(1).split(' ');
       const arg = rest.join(' ').trim();
@@ -231,22 +216,59 @@ export function initEvents() {
         case 'help':
           inp.value = '';
           toast('/plan /edit /yolo /clear /workspace <name>', 4000); return;
-        // Unknown slash command — let it fall through to the model as normal text.
       }
     }
 
+    destroySlashPopup();
     inp.value = '';
     inp.style.height = 'auto';
     import('./app.js').then(m => m.runAgent(t));
   };
+
   btn.onclick = doSend;
-  inp.onkeydown = e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
-  };
-  inp.oninput = () => {
+
+  // Single unified keydown handler — handles slash popup nav AND send.
+  inp.addEventListener('keydown', e => {
+    if (slashPopup) {
+      const rows = slashPopup.querySelectorAll('.slash-row');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashActive((slashActive + 1) % rows.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashActive((slashActive - 1 + rows.length) % rows.length);
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        const partial = inp.value.slice(1).toLowerCase();
+        const filtered = SLASH_COMMANDS.filter(c => c.cmd.startsWith(partial));
+        const match = filtered[slashActive] || filtered[0];
+        if (match) {
+          e.preventDefault();
+          applySlashCompletion(match);
+          return;
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        destroySlashPopup();
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
+  });
+
+  // Single unified input handler — auto-resize AND slash popup.
+  inp.addEventListener('input', () => {
     inp.style.height = 'auto';
     inp.style.height = Math.min(inp.scrollHeight, 180) + 'px';
-  };
+    updateSlashPopup();
+  });
 
   // Attach files.
   document.getElementById('attach-btn').onclick = () =>
@@ -299,20 +321,313 @@ export function initEvents() {
 
 
 
-  // -----------------------------------------------------------------------
-  // First-load setup modal — blocks the app until a key is provided.
-  // -----------------------------------------------------------------------
-  const setupModal = document.getElementById('setup-modal');
-  const setupProviderSel = document.getElementById('setup-provider');
+  // ─────────────────────────────────────────────────────────────
+  // Multi-step setup wizard
+  // ─────────────────────────────────────────────────────────────
+  const setupModal    = document.getElementById('setup-modal');
   const setupKeyInput = document.getElementById('setup-key');
-  const setupCustomBaseWrap = document.getElementById('setup-custom-base-wrap');
   const setupCustomBase = document.getElementById('setup-custom-base');
-  const setupSave = document.getElementById('setup-save');
-  const setupError = document.getElementById('setup-error');
-  const setupNoKey = document.getElementById('setup-no-key');
-  const setupEye = document.getElementById('setup-eye');
-  const appLock = document.getElementById('app-lock');
-  const appLockSetup = document.getElementById('app-lock-setup');
+  const setupCustomBaseWrap = document.getElementById('setup-custom-base-wrap');
+  const setupSave     = document.getElementById('setup-save');
+  const setupError    = document.getElementById('setup-error');
+  const setupNoKey    = document.getElementById('setup-no-key');
+  const setupEye      = document.getElementById('setup-eye');
+  const appLock       = document.getElementById('app-lock');
+  const appLockSetup  = document.getElementById('app-lock-setup');
+  const setupProviderSel = document.getElementById('setup-provider'); // hidden <select>, kept for compat
+
+  // Provider display metadata.
+  // logoSrc: path to a provider logo image — swap these for real assets.
+  // The img element is sized via CSS (.swiz-prov-logo img) so aspect ratio
+  // is preserved regardless of the original image dimensions.
+  const PROVIDER_META = {
+    mistral:   { label: 'Mistral',   ph: 'sk-…',     hint: 'console.mistral.ai',    logoSrc: 'assets/providers/mistral.png' },
+    openai:    { label: 'OpenAI',    ph: 'sk-…',     hint: 'platform.openai.com',   logoSrc: 'assets/providers/chatgpt.png' },
+    anthropic: { label: 'Anthropic', ph: 'sk-ant-…', hint: 'console.anthropic.com', logoSrc: 'assets/providers/anthropic.png' },
+    gemini:    { label: 'Gemini',    ph: 'AIza…',    hint: 'aistudio.google.com',   logoSrc: 'assets/providers/gemini.png' },
+    groq:      { label: 'Groq',      ph: 'gsk_…',    hint: 'console.groq.com',      logoSrc: 'assets/providers/groq.png' },
+    custom:    { label: 'Custom',    ph: 'key…',     hint: null,                    logoSrc: null },
+  };
+
+  let wizardStep = 0;
+  let wizardProvider = 'mistral';
+
+  function gsapWizard(fromEl, toEl, dir) {
+    const x = dir === 'forward' ? 36 : -36;
+    // Fix height thrash: use position:absolute on the outgoing step so both
+    // steps don't stack during the crossfade, keeping the wizard a fixed height.
+    fromEl.style.position = 'absolute';
+    fromEl.style.inset = '0';
+    fromEl.style.pointerEvents = 'none';
+    toEl.classList.add('active');
+    toEl.style.opacity = '0';
+    toEl.style.transform = `translateX(${x}px)`;
+
+    if (window.gsap) {
+      gsap.to(fromEl, {
+        x: -x, opacity: 0, duration: 0.22, ease: 'power2.in',
+        onComplete: () => {
+          fromEl.classList.remove('active');
+          fromEl.style.cssText = '';
+        }
+      });
+      gsap.to(toEl, {
+        x: 0, opacity: 1, duration: 0.28, ease: 'power2.out',
+        onComplete: () => { toEl.style.transform = ''; toEl.style.opacity = ''; }
+      });
+    } else {
+      fromEl.classList.remove('active');
+      fromEl.style.cssText = '';
+      toEl.style.cssText = '';
+    }
+    // Update progress dots
+    document.querySelectorAll('.swiz-dot').forEach((d, i) => {
+      d.classList.toggle('active', i <= parseInt(toEl.id.split('-').pop()));
+    });
+  }
+
+  function goToStep(n) {
+    const from = document.getElementById('swiz-step-' + wizardStep);
+    const to   = document.getElementById('swiz-step-' + n);
+    if (!from || !to) return;
+    gsapWizard(from, to, n > wizardStep ? 'forward' : 'back');
+    wizardStep = n;
+  }
+
+  function buildProviderGrid() {
+    const grid = document.getElementById('swiz-provider-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    for (const [id, meta] of Object.entries(PROVIDER_META)) {
+      const card = document.createElement('button');
+      card.className = 'swiz-provider-card';
+      card.dataset.provider = id;
+
+      const logoWrap = document.createElement('span');
+      logoWrap.className = 'swiz-prov-logo';
+      if (meta.logoSrc) {
+        const img = document.createElement('img');
+        img.src = meta.logoSrc;
+        img.alt = meta.label;
+        img.draggable = false;
+        logoWrap.appendChild(img);
+      } else {
+        // No logo image — use a provider-specific Lucide icon
+        const iconName = id === 'anthropic' ? 'sparkles'
+          : id === 'groq' ? 'zap'
+          : 'settings-2';
+        logoWrap.innerHTML = `<i data-lucide="${iconName}" class="swiz-prov-lucide"></i>`;
+      }
+
+      const lbl = document.createElement('span');
+      lbl.className = 'swiz-prov-label';
+      lbl.textContent = meta.label;
+
+      card.append(logoWrap, lbl);
+      card.onclick = () => {
+        document.querySelectorAll('.swiz-provider-card').forEach(c => c.classList.remove('sel'));
+        card.classList.add('sel');
+        wizardProvider = id;
+        S.provider = id;
+        if (setupProviderSel) setupProviderSel.value = id;
+        document.getElementById('swiz-next-1').disabled = false;
+        setupCustomBaseWrap?.classList.toggle('hidden', id !== 'custom');
+      };
+      grid.appendChild(card);
+    }
+    // Re-run Lucide so the custom card's icon renders
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function updateKeyStep() {
+    const meta = PROVIDER_META[wizardProvider] || PROVIDER_META.mistral;
+    const titleEl = document.getElementById('swiz-key-title');
+    const hintEl  = document.getElementById('swiz-key-hint');
+    const linkEl  = document.getElementById('swiz-key-link');
+    if (titleEl) {
+      if (meta.logoSrc) {
+        titleEl.innerHTML = `<span class="swiz-key-logo"><img src="${meta.logoSrc}" alt="${meta.label}"></span> Your ${meta.label} API key`;
+      } else {
+        titleEl.innerHTML = `<span class="swiz-key-logo"><i data-lucide="settings-2" style="width:20px;height:20px"></i></span> Your ${meta.label} API key`;
+        if (window.lucide) lucide.createIcons({ el: titleEl });
+      }
+    }
+    if (hintEl) hintEl.textContent = 'Stored only in this browser. Never sent anywhere except directly to the provider.';
+    if (setupKeyInput) { setupKeyInput.value = ''; setupKeyInput.placeholder = meta.ph || 'key…'; }
+    if (linkEl) {
+      linkEl.innerHTML = meta.hint
+        ? `<a href="https://${meta.hint}" target="_blank" rel="noopener">${meta.hint}</a>`
+        : '';
+    }
+    if (setupError) { setupError.textContent = ''; setupError.classList.add('hidden'); }
+    if (setupSave) setupSave.disabled = true;
+  }
+
+  function showSetupError(msg) {
+    if (!setupError) return;
+    setupError.textContent = msg;
+    setupError.classList.remove('hidden');
+    if (window.gsap) gsap.fromTo(setupError, { x: -6 }, { x: 0, duration: 0.3, ease: 'elastic.out(1,0.5)' });
+  }
+  function clearSetupError() {
+    if (!setupError) return;
+    setupError.textContent = '';
+    setupError.classList.add('hidden');
+  }
+
+  function showSetupModal() {
+    if (!setupModal) return;
+    wizardStep = 0;
+    document.querySelectorAll('.swiz-step').forEach((s, i) => s.classList.toggle('active', i === 0));
+    document.querySelectorAll('.swiz-dot').forEach((d, i) => d.classList.toggle('active', i === 0));
+    buildProviderGrid();
+    populateProviderSelect(setupProviderSel, S.provider);
+    setupModal.classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+    if (window.gsap) {
+      gsap.fromTo('.setup-wizard', { scale: 0.93, opacity: 0, y: 20 },
+        { scale: 1, opacity: 1, y: 0, duration: 0.4, ease: 'back.out(1.4)' });
+      gsap.fromTo('.swiz-glyph svg', { rotation: -10, scale: 0.8, opacity: 0 },
+        { rotation: 0, scale: 1, opacity: 1, duration: 0.6, delay: 0.2, ease: 'back.out(1.7)' });
+      gsap.fromTo('.swiz-wordmark', { y: 12, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, delay: 0.35 });
+      gsap.fromTo('#swiz-step-0 .swiz-h, #swiz-step-0 .swiz-p, #swiz-step-0 .swiz-p-sub, #swiz-step-0 .swiz-cta, #swiz-step-0 .setup-link',
+        { y: 10, opacity: 0 }, { y: 0, opacity: 1, duration: 0.4, stagger: 0.07, delay: 0.45 });
+    }
+    document.getElementById('prompt-inp')?.setAttribute('disabled', '');
+    appLock?.classList.add('hidden');
+  }
+
+  function lockApp() {
+    appLock?.classList.remove('hidden');
+    document.getElementById('prompt-inp')?.setAttribute('disabled', '');
+  }
+
+  // Step 0 → 1
+  document.getElementById('swiz-next-0')?.addEventListener('click', () => goToStep(1));
+
+  // Step 1 back/forward
+  document.getElementById('swiz-back-1')?.addEventListener('click', () => goToStep(0));
+  document.getElementById('swiz-next-1')?.addEventListener('click', () => {
+    if (wizardProvider === 'custom' && !setupCustomBase?.value.trim()) {
+      setupCustomBaseWrap.classList.remove('hidden');
+      setupCustomBase?.focus();
+      return;
+    }
+    if (wizardProvider === 'custom') S.customProvider = { ...S.customProvider, baseUrl: setupCustomBase.value.trim() };
+    updateKeyStep();
+    goToStep(2);
+    setTimeout(() => setupKeyInput?.focus(), 300);
+  });
+
+  // Step 2 back
+  document.getElementById('swiz-back-2')?.addEventListener('click', () => goToStep(1));
+
+  // Key input validation
+  setupKeyInput?.addEventListener('input', () => {
+    clearSetupError();
+    if (setupSave) setupSave.disabled = setupKeyInput.value.trim().length < 4;
+  });
+  setupKeyInput?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !setupSave?.disabled) setupSave?.click();
+  });
+
+  // Save key — now on setupSave (step 2 CTA)
+  if (setupSave) {
+    setupSave.onclick = async function () {
+      const key = setupKeyInput?.value.trim();
+      if (!key) { showSetupError('Paste your API key first.'); return; }
+      if (wizardProvider === 'custom') {
+        S.customProvider.baseUrl = setupCustomBase?.value.trim() || '';
+        if (!S.customProvider.baseUrl) { showSetupError('Enter a base URL for your custom provider.'); return; }
+      }
+      S.provider = wizardProvider;
+      setupSave.disabled = true;
+      const origText = setupSave.textContent;
+      setupSave.textContent = 'Verifying…';
+      clearSetupError();
+
+      const res = await testKey(key, wizardProvider);
+      if (!res.ok) {
+        showSetupError('Key rejected: ' + (res.error || 'unknown error'));
+        setupSave.disabled = false;
+        setupSave.textContent = origText;
+        return;
+      }
+      if (res.warning) toast(res.warning, 3000);
+
+      if (!S.apiKeys[wizardProvider]) S.apiKeys[wizardProvider] = [];
+      const existing = S.apiKeys[wizardProvider].findIndex(k => k.key === key);
+      if (existing >= 0) {
+        S.apiKeys[wizardProvider][existing] = { ...S.apiKeys[wizardProvider][existing], active: true };
+        setActiveApiKey(wizardProvider, existing);
+      } else {
+        S.apiKeys[wizardProvider].push({ key, name: 'Default', active: true });
+        setActiveApiKey(wizardProvider, S.apiKeys[wizardProvider].length - 1);
+      }
+      await refreshProviderModels(wizardProvider, true, key);
+      S.model = getProviderModelList(wizardProvider)[0] || S.model;
+      saveState();
+      updateStatusBar();
+      updateFooterMeta();
+      refreshKeyStatus();
+      setupSave.textContent = origText;
+
+      // Advance to success step with checkmark animation
+      goToStep(3);
+      const doneEl = document.getElementById('swiz-done-model');
+      const doneMeta = PROVIDER_META[wizardProvider] || PROVIDER_META.mistral;
+      if (doneEl) {
+        const logoHtml = doneMeta.logoSrc
+          ? `<img src="${doneMeta.logoSrc}" alt="${doneMeta.label}" style="width:20px;height:20px;border-radius:5px;vertical-align:middle;margin-right:6px;">`
+          : '';
+        doneEl.innerHTML = `${logoHtml}${doneMeta.label} · ${S.model}`;
+      }
+      if (window.gsap) {
+        gsap.to('.swiz-check', { strokeDashoffset: 0, duration: 0.6, delay: 0.35, ease: 'power2.out' });
+        gsap.fromTo('.swiz-success-ring', { scale: 0.7, opacity: 0 },
+          { scale: 1, opacity: 1, duration: 0.5, delay: 0.1, ease: 'back.out(1.5)' });
+      }
+    };
+  }
+
+  // Finish button (step 3)
+  document.getElementById('swiz-finish')?.addEventListener('click', () => {
+    if (window.gsap) {
+      gsap.to('.setup-wizard', { scale: 0.95, opacity: 0, y: -16, duration: 0.25, ease: 'power2.in',
+        onComplete: () => { setupModal.classList.add('hidden'); document.getElementById('prompt-inp')?.removeAttribute('disabled'); } });
+    } else {
+      setupModal.classList.add('hidden');
+      document.getElementById('prompt-inp')?.removeAttribute('disabled');
+    }
+  });
+
+  if (setupNoKey) {
+    setupNoKey.onclick = function () {
+      localStorage.setItem('aria_no_key', '1');
+      setupModal.classList.add('hidden');
+      lockApp();
+    };
+  }
+
+  if (setupEye && setupKeyInput) {
+    setupEye.onclick = () => {
+      const isPw = setupKeyInput.type === 'password';
+      setupKeyInput.type = isPw ? 'text' : 'password';
+      const icon = document.getElementById('setup-eye-icon');
+      if (icon) {
+        icon.setAttribute('data-lucide', isPw ? 'eye-off' : 'eye');
+        if (window.lucide) lucide.createIcons({ el: setupEye });
+      }
+      setupEye.style.color = isPw ? 'var(--acc)' : '';
+    };
+  }
+
+  if (appLockSetup) {
+    appLockSetup.onclick = () => {
+      appLock?.classList.add('hidden');
+      showSetupModal();
+    };
+  }
 
   // Settings modal (gear icon)
   const settingsBtn = document.getElementById('settings-btn');
@@ -386,17 +701,6 @@ export function initEvents() {
     }
   }
 
-  function showSetupError(msg) {
-    if (!setupError) return;
-    setupError.textContent = msg;
-    setupError.classList.remove('hidden');
-  }
-  function clearSetupError() {
-    if (!setupError) return;
-    setupError.textContent = '';
-    setupError.classList.add('hidden');
-  }
-
   function populateProviderSelect(sel, selected = S.provider) {
     if (!sel) return;
     sel.innerHTML = '';
@@ -433,141 +737,19 @@ export function initEvents() {
     }
   }
 
-  function showSetupModal() {
-    if (!setupModal) return;
-    populateProviderSelect(setupProviderSel, S.provider);
-    updateCustomProviderVisibility();
-    setupModal.classList.remove('hidden');
-    const inp = document.getElementById('prompt-inp');
-    if (inp) inp.disabled = true;
-    if (appLock) appLock.classList.add('hidden');
-    setTimeout(function () { if (setupKeyInput) setupKeyInput.focus(); }, 100);
-  }
-
-  function lockApp() {
-    if (appLock) appLock.classList.remove('hidden');
-    const inp = document.getElementById('prompt-inp');
-    if (inp) inp.disabled = true;
-  }
-
-  function updateSaveButton() {
-    if (!setupSave || !setupKeyInput) return;
-    const v = setupKeyInput.value.trim();
-    const provider = setupProviderSel?.value || S.provider;
-    const needsBase = provider === 'custom';
-    setupSave.disabled = v.length < 4 || (needsBase && !setupCustomBase?.value.trim());
-  }
-  if (setupKeyInput) {
-    setupKeyInput.addEventListener('input', function () {
-      clearSetupError();
-      updateSaveButton();
-    });
-    setupKeyInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !setupSave.disabled) {
-        e.preventDefault();
-        setupSave.click();
-      }
-    });
-  }
-  if (setupProviderSel) {
-    setupProviderSel.onchange = function () {
-      S.provider = setupProviderSel.value;
-      updateCustomProviderVisibility();
-      updateSaveButton();
-    };
-  }
-  if (setupCustomBase) {
-    setupCustomBase.addEventListener('input', function () {
-      S.customProvider.baseUrl = setupCustomBase.value.trim();
-      updateSaveButton();
-    });
-  }
-
-  if (setupEye && setupKeyInput) {
-    setupEye.onclick = function () {
-      const isPw = setupKeyInput.type === 'password';
-      setupKeyInput.type = isPw ? 'text' : 'password';
-      setupEye.style.color = isPw ? 'var(--acc)' : 'var(--txt3)';
-    };
-  }
   if (settingsEye) {
-    const settingsInput = document.getElementById('api-key'); // This is now a display for the active key
+    const settingsInput = document.getElementById('api-key');
     settingsEye.onclick = function () {
       if (!settingsInput) return;
       if (settingsInput.type === 'password') {
         settingsInput.type = 'text';
-        settingsInput.value = getActiveApiKey(); // Reveal the actual key
+        settingsInput.value = getActiveApiKey();
         settingsEye.style.color = 'var(--acc)';
       } else {
         settingsInput.type = 'password';
-        // Mask the key again, keep the placeholder or masked value
         settingsInput.value = settingsInput.value ? '••••••••••••' : '';
         settingsEye.style.color = 'var(--txt3)';
       }
-    };
-  }
-
-  if (setupSave) {
-    setupSave.onclick = async function () {
-      const provider = setupProviderSel?.value || S.provider;
-      const key = setupKeyInput.value.trim();
-      if (!key) { showSetupError('Please enter a key.'); return; }
-      if (provider === 'custom') {
-        S.customProvider.baseUrl = setupCustomBase?.value.trim() || '';
-        if (!S.customProvider.baseUrl) { showSetupError('Please enter a custom provider base URL.'); return; }
-      }
-      S.provider = provider;
-      setupSave.disabled = true;
-      const oldText = setupSave.textContent;
-      setupSave.textContent = 'Testing…';
-      clearSetupError();
-      const res = await testKey(key, provider);
-      if (!res.ok) {
-        showSetupError('Key rejected: ' + (res.error || 'unknown error'));
-        setupSave.disabled = false;
-        setupSave.textContent = oldText;
-        return;
-      }
-      if (res.warning) {
-        toast(res.warning, 'warn');
-      }
-      if (!S.apiKeys[provider]) S.apiKeys[provider] = [];
-      const existing = S.apiKeys[provider].findIndex(k => k.key === key);
-      if (existing >= 0) {
-        S.apiKeys[provider][existing] = { ...S.apiKeys[provider][existing], name: 'Default', active: true };
-        setActiveApiKey(provider, existing);
-      } else {
-        S.apiKeys[provider].push({ key, name: 'Default', active: true });
-        setActiveApiKey(provider, S.apiKeys[provider].length - 1);
-      }
-      await refreshProviderModels(provider, true, key);
-      S.model = getProviderModelList(provider)[0] || S.model;
-      saveState();
-      updateStatusBar();
-      updateFooterMeta();
-      refreshKeyStatus();
-      if (appLock) appLock.classList.add('hidden');
-      if (setupModal) setupModal.classList.add('hidden');
-      const inp = document.getElementById('prompt-inp');
-      if (inp) inp.disabled = false;
-      toast('API key saved');
-      setupSave.textContent = oldText;
-    };
-  }
-
-  if (setupNoKey) {
-    setupNoKey.onclick = function () {
-      localStorage.setItem('aria_no_key', '1');
-      setupModal.classList.add('hidden');
-      lockApp();
-      toast('ARIA is locked. Open the settings gear to add a key.');
-    };
-  }
-
-  if (appLockSetup) {
-    appLockSetup.onclick = function () {
-      if (appLock) appLock.classList.add('hidden');
-      showSetupModal();
     };
   }
 

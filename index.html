@@ -14,6 +14,9 @@
 <body>
 <div id="app">
 
+  <!-- Backdrop scrim for mobile drawer -->
+  <div id="sb-backdrop"></div>
+
   <!-- SIDEBAR -->
   <div id="sidebar" class="hide">
     <div class="sb-head">
@@ -206,40 +209,121 @@
 </div>
 
 <div id="setup-modal" class="modal-backdrop hidden">
-  <div class="setup-card">
-    <div class="setup-logo">ARIA</div>
-    <div class="setup-title">Provider Setup</div>
-    <div class="setup-subtitle">Choose a provider and save the first API key for this browser.</div>
-    <div class="setup-form">
-      <div class="inp-grp">
-        <label>Provider</label>
-        <select id="setup-provider" style="width:100%;"></select>
+  <div class="setup-wizard">
+
+    <!-- Progress dots -->
+    <div class="swiz-progress">
+      <div class="swiz-dot active" data-step="0"></div>
+      <div class="swiz-dot" data-step="1"></div>
+      <div class="swiz-dot" data-step="2"></div>
+      <div class="swiz-dot" data-step="3"></div>
+    </div>
+
+    <div class="swiz-steps-wrap">
+
+      <!-- Step 0: Welcome -->
+      <div class="swiz-step active" id="swiz-step-0">
+        <div class="swiz-glyph">
+          <svg viewBox="0 0 64 64" fill="none">
+            <circle cx="32" cy="32" r="30" stroke="url(#sg)" stroke-width="1.5" stroke-dasharray="4 3"/>
+            <circle cx="32" cy="32" r="14" fill="url(#sg)" opacity=".18"/>
+            <path d="M22 32l6 6 14-14" stroke="url(#sg)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs>
+              <linearGradient id="sg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#b794ff"/>
+                <stop offset="1" stop-color="#29d8cc"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="swiz-wordmark">ARIA</div>
+        <h2 class="swiz-h">Your browser-native AI coding agent.</h2>
+        <p class="swiz-p">Works with Mistral, OpenAI, Anthropic, Gemini, and Groq. Reads and writes your files, runs code, searches the web — all locally in your browser.</p>
+        <p class="swiz-p-sub">Setup takes about 30 seconds.</p>
+        <button class="swiz-cta" id="swiz-next-0">
+          Get started
+          <i data-lucide="arrow-right" class="swiz-btn-icon"></i>
+        </button>
+        <button class="setup-link" id="setup-no-key">I'll set this up later</button>
       </div>
-      <div class="inp-grp hidden" id="setup-custom-base-wrap">
-        <label>Base URL</label>
-        <input type="url" id="setup-custom-base" placeholder="https://api.example.com/v1" style="width:100%;">
-      </div>
-      <div class="inp-grp">
-        <label>API Key</label>
-        <div class="setup-input-wrap">
-          <input type="password" id="setup-key" placeholder="sk-...">
-          <button class="setup-eye" id="setup-eye">
-            <svg viewBox="0 0 16 16" fill="none" width="16" height="16">
-              <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3"/>
-              <circle cx="8" cy="8" r="2.5" fill="currentColor"/>
-            </svg>
+
+      <!-- Step 1: Pick provider -->
+      <div class="swiz-step" id="swiz-step-1">
+        <div class="swiz-step-icon">
+          <i data-lucide="plug" class="swiz-lucide-lg"></i>
+        </div>
+        <h2 class="swiz-h">Which AI provider are you using?</h2>
+        <p class="swiz-p">You can add more providers later in Settings. All keys stay in your browser.</p>
+        <div class="swiz-provider-grid" id="swiz-provider-grid">
+          <!-- filled by JS -->
+        </div>
+        <div class="swiz-custom-wrap hidden" id="setup-custom-base-wrap">
+          <input type="url" id="setup-custom-base" placeholder="Base URL — e.g. https://api.example.com/v1" class="swiz-inp">
+        </div>
+        <div class="swiz-nav">
+          <button class="swiz-back" id="swiz-back-1">
+            <i data-lucide="arrow-left" class="swiz-btn-icon"></i>
+            Back
+          </button>
+          <button class="swiz-cta sm" id="swiz-next-1" disabled>
+            Continue
+            <i data-lucide="arrow-right" class="swiz-btn-icon"></i>
           </button>
         </div>
+        <select id="setup-provider" class="swiz-provider-sel hidden"></select>
       </div>
-      <div id="setup-error" class="setup-error hidden"></div>
-      <div class="setup-actions">
-        <button class="btn prim" id="setup-save" disabled>Save Key</button>
+
+      <!-- Step 2: API key -->
+      <div class="swiz-step" id="swiz-step-2">
+        <div class="swiz-step-icon">
+          <i data-lucide="key-round" class="swiz-lucide-lg"></i>
+        </div>
+        <h2 class="swiz-h" id="swiz-key-title">Paste your API key</h2>
+        <p class="swiz-p" id="swiz-key-hint">Stored only in this browser. Never sent anywhere except directly to the provider.</p>
+        <div class="swiz-inp-wrap">
+          <input type="password" id="setup-key" class="swiz-inp" placeholder="sk-…" autocomplete="off">
+          <button class="setup-eye" id="setup-eye" title="Show/hide key">
+            <i data-lucide="eye" id="setup-eye-icon" width="15" height="15"></i>
+          </button>
+        </div>
+        <div id="setup-error" class="setup-error hidden"></div>
+        <div class="swiz-nav">
+          <button class="swiz-back" id="swiz-back-2">
+            <i data-lucide="arrow-left" class="swiz-btn-icon"></i>
+            Back
+          </button>
+          <button class="swiz-cta sm" id="setup-save" disabled>
+            Verify &amp; Save
+            <i data-lucide="shield-check" class="swiz-btn-icon"></i>
+          </button>
+        </div>
+        <p class="swiz-key-link" id="swiz-key-link"></p>
       </div>
-      <div class="setup-foot">
-        <button class="setup-link" id="setup-no-key">Continue locked</button>
+
+      <!-- Step 3: Done -->
+      <div class="swiz-step" id="swiz-step-3">
+        <div class="swiz-success-ring" id="swiz-success-ring">
+          <svg viewBox="0 0 80 80" fill="none">
+            <circle cx="40" cy="40" r="36" stroke="url(#sg2)" stroke-width="1.5"/>
+            <path class="swiz-check" d="M25 40l10 10 20-20" stroke="url(#sg2)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="60" stroke-dashoffset="60"/>
+            <defs>
+              <linearGradient id="sg2" x1="0" y1="0" x2="80" y2="80" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#b794ff"/>
+                <stop offset="1" stop-color="#29d8cc"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <h2 class="swiz-h">You're all set.</h2>
+        <p class="swiz-p" id="swiz-done-model">Ready to code.</p>
+        <button class="swiz-cta" id="swiz-finish">
+          Open ARIA
+          <i data-lucide="arrow-right" class="swiz-btn-icon"></i>
+        </button>
       </div>
-    </div>
-  </div>
+
+    </div><!-- /swiz-steps-wrap -->
+  </div><!-- /setup-wizard -->
 </div>
 
 <!-- Hidden action triggers (referenced by welcome screen and events.js) -->
@@ -379,6 +463,7 @@
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <script src="https://unpkg.com/lucide@latest"></script>
 <script type="module" src="js/app.js"></script>
 </body>

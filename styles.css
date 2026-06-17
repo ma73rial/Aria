@@ -889,3 +889,412 @@ li { display: list-item; text-align: -webkit-match-parent; }
 .app-lock-title { font-size: 14px; font-weight: 600; color: var(--txt); margin-bottom: 4px; }
 .app-lock-sub { font-size: 11.5px; color: var(--txt3); margin-bottom: 14px; line-height: 1.5; }
 .app-lock .btn { padding: 8px 18px; }
+
+
+/* ═══════════════════════════════════════════════════════════
+   SETUP WIZARD
+   ═══════════════════════════════════════════════════════════ */
+
+.setup-wizard {
+  background: var(--surf);
+  border: 1px solid var(--border2);
+  border-radius: 20px;
+  padding: 48px 44px 40px;
+  max-width: 480px;
+  width: 92vw;
+  text-align: center;
+  box-shadow: 0 32px 80px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.04);
+  position: relative;
+  overflow: hidden;
+}
+.setup-wizard::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(183,148,255,.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* Progress dots */
+.swiz-progress {
+  display: flex; gap: 8px; justify-content: center;
+  margin-bottom: 40px;
+}
+.swiz-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--border2);
+  transition: all .3s cubic-bezier(.4,0,.2,1);
+}
+.swiz-dot.active {
+  background: linear-gradient(135deg, var(--purple), var(--teal));
+  width: 20px; border-radius: 3px;
+}
+
+/* Steps — only .active is shown; container is position:relative so the
+   outgoing step (position:absolute during transition) doesn't collapse it */
+.swiz-steps-wrap {
+  position: relative;
+  width: 100%;
+  /* min-height keeps the card from jumping when step content differs in length */
+  min-height: 320px;
+  display: flex; align-items: flex-start;
+}
+.swiz-step {
+  display: none; flex-direction: column; align-items: center; gap: 0;
+  width: 100%;
+}
+.swiz-step.active { display: flex; }
+
+/* Step 0 */
+.swiz-glyph {
+  width: 72px; height: 72px; margin-bottom: 20px;
+}
+.swiz-glyph svg { width: 100%; height: 100%; }
+.swiz-wordmark {
+  font-family: var(--mono); font-size: 13px; font-weight: 600;
+  letter-spacing: .24em; text-transform: uppercase;
+  background: linear-gradient(130deg, var(--purple) 0%, var(--teal) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 16px;
+}
+.swiz-h {
+  font-family: var(--sans); font-size: 21px; font-weight: 600;
+  color: var(--txt); letter-spacing: -.02em; line-height: 1.3;
+  margin-bottom: 10px;
+}
+.swiz-p {
+  font-size: 13px; color: var(--txt2); line-height: 1.65;
+  max-width: 340px; margin-bottom: 8px;
+}
+.swiz-p-sub {
+  font-size: 11px; color: var(--txt3); margin-bottom: 28px;
+  font-family: var(--mono);
+}
+
+/* CTAs */
+.swiz-cta {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 11px 28px;
+  background: linear-gradient(135deg, var(--purple) 0%, var(--acc) 100%);
+  border: none; border-radius: 12px; color: #fff;
+  font-size: 14px; font-weight: 600; font-family: var(--sans);
+  cursor: pointer; letter-spacing: -.01em;
+  box-shadow: 0 4px 20px rgba(183,148,255,.35);
+  transition: transform .14s, box-shadow .14s, opacity .14s;
+  margin-top: 8px;
+}
+.swiz-cta:hover { transform: translateY(-1px); box-shadow: 0 6px 26px rgba(183,148,255,.45); }
+.swiz-cta:active { transform: translateY(0); }
+.swiz-cta.sm { padding: 9px 20px; font-size: 13px; }
+.swiz-cta:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.swiz-back {
+  background: none; border: 1px solid var(--border2);
+  border-radius: 10px; color: var(--txt3); padding: 9px 16px;
+  font-size: 13px; font-family: var(--sans); cursor: pointer;
+  transition: all .14s;
+}
+.swiz-back:hover { border-color: var(--border); color: var(--txt2); background: var(--surf2); }
+
+.swiz-nav {
+  display: flex; gap: 10px; align-items: center;
+  justify-content: space-between; width: 100%; margin-top: 20px;
+}
+
+/* Provider logo in card — img gets constrained, never bleeds out */
+.swiz-prov-logo {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+}
+.swiz-prov-logo img {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+.swiz-prov-lucide { width: 22px; height: 22px; color: var(--txt3); }
+.swiz-prov-label { font-size: 11px; font-weight: 500; color: var(--txt2); }
+.swiz-provider-card.sel .swiz-prov-label { color: var(--acc); }
+
+/* Step icon (Lucide, large) */
+.swiz-step-icon { margin-bottom: 14px; }
+.swiz-lucide-lg { width: 32px; height: 32px; color: var(--acc); display: block; }
+
+/* Provider logo in key step title */
+.swiz-key-logo { display: inline-flex; vertical-align: middle; margin-right: 6px; }
+.swiz-key-logo img { width: 22px; height: 22px; border-radius: 5px; object-fit: contain; }
+
+/* Lucide icons inside buttons */
+.swiz-btn-icon { width: 15px; height: 15px; margin-left: 6px; flex-shrink: 0; }
+
+/* Step 1 — provider grid */
+.swiz-provider-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 8px; width: 100%; margin: 16px 0 0;
+}
+.swiz-provider-card {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 14px 8px 12px;
+  background: var(--surf2); border: 1.5px solid var(--border2);
+  border-radius: 12px; cursor: pointer;
+  transition: all .15s cubic-bezier(.4,0,.2,1);
+  font-family: var(--sans);
+}
+.swiz-provider-card:hover {
+  border-color: var(--border); background: var(--surf3);
+  transform: translateY(-1px);
+}
+.swiz-provider-card.sel {
+  border-color: var(--acc); background: rgba(41,216,204,.08);
+  box-shadow: 0 0 0 3px rgba(41,216,204,.14);
+}
+
+.swiz-or {
+  font-size: 10px; color: var(--txt3); font-family: var(--mono);
+  margin: 12px 0 4px; letter-spacing: .08em;
+}
+.swiz-provider-sel { display: none; }
+.swiz-custom-wrap { width: 100%; margin-top: 6px; }
+
+/* Step 2 — key input */
+.swiz-inp-wrap { position: relative; width: 100%; margin: 14px 0 0; }
+.swiz-inp {
+  width: 100%; padding: 11px 40px 11px 13px;
+  background: var(--surf2); border: 1.5px solid var(--border2);
+  border-radius: 10px; color: var(--txt);
+  font-size: 14px; font-family: var(--mono);
+  outline: none; transition: border-color .15s, box-shadow .15s;
+  letter-spacing: .04em;
+}
+.swiz-inp:focus { border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-glow); }
+.swiz-inp::placeholder { color: var(--txt3); letter-spacing: 0; }
+.swiz-inp-wrap .setup-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
+
+.swiz-key-link { margin-top: 10px; font-size: 11px; }
+.swiz-key-link a { color: var(--acc); text-decoration: none; }
+.swiz-key-link a:hover { text-decoration: underline; }
+
+/* Step 3 — success */
+.swiz-success-ring {
+  width: 90px; height: 90px; margin-bottom: 20px;
+}
+.swiz-success-ring svg { width: 100%; height: 100%; }
+.swiz-check { transition: stroke-dashoffset .6s ease; }
+
+/* ═══════════════════════════════════════════════════════════
+   MOBILE CSS  (≤ 600px)
+   ═══════════════════════════════════════════════════════════ */
+
+@media (max-width: 600px) {
+  :root { --sidebar: 100vw; }
+
+  /* Full-screen sidebar overlay on mobile */
+  #sidebar {
+    width: 100vw; min-width: 0;
+    box-shadow: 0 0 40px rgba(0,0,0,.6);
+  }
+  #main.sb-open { margin-left: 0; }
+
+  /* Top bar */
+  #top-bar { padding: 6px 10px; height: 42px; gap: 6px; }
+  #ws-display { font-size: 10px; max-width: 160px; }
+
+  /* Chat */
+  #msgs { padding: 16px 12px 8px; gap: 14px; }
+
+  /* User bubble — full width on mobile */
+  .user-bub { max-width: 90%; font-size: 13px; padding: 9px 13px; }
+
+  /* Input area — compact */
+  #input-area {
+    padding: 7px 8px 10px; gap: 5px;
+    /* Keep above iOS safe area */
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
+  #attach-btn { width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0; }
+  #prompt-inp { font-size: 14px; padding: 7px 9px; min-height: 36px; }
+  #send-btn { padding: 7px 11px; font-size: 11px; height: 36px; border-radius: 8px; letter-spacing: .03em; }
+
+  /* Status bar — hide on mobile (too small) */
+  #status-bar { display: none; }
+
+  /* Messages — wider code blocks */
+  .thought, .final { font-size: 13px; }
+  .diff-blk, .code-blk, .md-wrap, .html-wrap, .artifact { max-width: 100%; }
+
+  /* Modal — full height sheet from bottom */
+  .modal-backdrop { align-items: flex-end; }
+  .modal {
+    max-width: 100%; width: 100%;
+    border-radius: 16px 16px 0 0;
+    max-height: 90vh;
+  }
+
+  /* Setup wizard — smaller padding */
+  .setup-wizard {
+    padding: 36px 24px 28px;
+    border-radius: 16px 16px 0 0;
+    max-width: 100%;
+    width: 100%;
+  }
+  .modal-backdrop:has(.setup-wizard) { align-items: flex-end; }
+  .swiz-h { font-size: 18px; }
+  .swiz-p { font-size: 12px; }
+  .swiz-provider-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .swiz-provider-card { padding: 10px 6px 9px; }
+  .swiz-prov-emoji { font-size: 18px; }
+  .swiz-prov-label { font-size: 10px; }
+  .swiz-cta { font-size: 13px; padding: 11px 22px; }
+  .swiz-glyph { width: 56px; height: 56px; }
+
+  /* Welcome screen — tighter */
+  #welcome { padding: 40px 16px 24px; gap: 10px; }
+  .wlc-logo { font-size: 36px; }
+  .wlc-actions { flex-direction: column; align-items: stretch; }
+  .act-pill { justify-content: center; }
+
+  /* Sidebar footer — hide token count */
+  #sb-footer-tokens, #sb-footer-tok-sep { display: none !important; }
+}
+
+/* ─── Tablet (601–900px) ─── */
+@media (min-width: 601px) and (max-width: 900px) {
+  :root { --sidebar: 260px; }
+  #msgs { padding: 20px 16px 10px; }
+  .user-bub { max-width: 80%; }
+}
+
+/* ─── Subtle entrance animations for chat messages ─── */
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.msg-user, .msg-agent {
+  animation: msgIn .22s cubic-bezier(.4,0,.2,1) both;
+}
+
+/* ─── Input area focus ring glow pulse on mobile ─── */
+@media (max-width: 600px) {
+  #prompt-wrap:focus-within {
+    box-shadow: 0 0 0 2px var(--acc-glow);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   FILE PREVIEW MODAL
+   ═══════════════════════════════════════════════════════════ */
+
+.file-preview-modal {
+  max-width: 820px;
+  width: 92vw;
+}
+
+.file-preview-modal .modal-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fpm-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--txt);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+.fpm-meta {
+  font-size: 10px;
+  color: var(--txt3);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.fpm-body {
+  padding: 0 !important;
+  overflow: hidden;
+  border-radius: 0 0 var(--r) var(--r);
+}
+
+.fpm-body pre {
+  background: var(--bg);
+  padding: 16px;
+  border-radius: 0 0 var(--r) var(--r);
+}
+
+.fpm-body pre code {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+/* Download button micro-style */
+.fpm-dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  border-color: var(--border2);
+  transition: all .14s;
+}
+.fpm-dl-btn:hover {
+  border-color: var(--acc) !important;
+  color: var(--acc) !important;
+}
+
+/* Mobile: file preview as bottom sheet */
+@media (max-width: 600px) {
+  .file-preview-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 16px 16px 0 0;
+    max-height: 88vh;
+  }
+  .fpm-title { max-width: 160px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SIDEBAR DRAWER — MOBILE
+   ═══════════════════════════════════════════════════════════ */
+
+/* Backdrop scrim — shown only on mobile when sidebar is open */
+#sb-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 199;
+  background: rgba(0,0,0,0);
+  transition: background .22s ease;
+  pointer-events: none;
+}
+#sb-backdrop.visible {
+  display: block;
+  pointer-events: all;
+  background: rgba(0,0,0,.55);
+}
+
+@media (max-width: 600px) {
+  /* Sidebar becomes a slide-in drawer, never pushes main */
+  #sidebar {
+    width: min(320px, 88vw) !important;
+    min-width: 0 !important;
+    box-shadow: 4px 0 32px rgba(0,0,0,.65);
+  }
+  /* Main never shifts — drawer overlays */
+  #main.sb-open {
+    margin-left: 0 !important;
+  }
+  /* Show the backdrop scrim when sidebar is open */
+  body.sb-drawer-open #sb-backdrop {
+    display: block;
+    pointer-events: all;
+    background: rgba(0,0,0,.55);
+  }
+}

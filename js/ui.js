@@ -29,9 +29,12 @@ Bus.on('widget:suggest_mode', ({ mode, reason, settle }) => {
 
   const lb = document.createElement('button');
   lb.className = 'act-bub';
-  lb.textContent = mode === 'open_folder' ? '\ud83d\udcc1 Open Folder'
-    : mode === 'new_idb' ? '\ud83d\udfc4 New IDB Session'
+  lb.innerHTML = mode === 'open_folder'
+    ? '<i data-lucide="folder-open" style="width:13px;height:13px;vertical-align:middle;margin-right:4px"></i>Open Folder'
+    : mode === 'new_idb'
+      ? '<i data-lucide="plus-square" style="width:13px;height:13px;vertical-align:middle;margin-right:4px"></i>New Session'
       : 'Switch to ' + mode.toUpperCase();
+  if (window.lucide) lucide.createIcons({ el: lb });
 
   const sb = document.createElement('button');
   sb.className = 'act-bub';
@@ -216,9 +219,12 @@ export function renderToolResult(name, result) {
       open_folder: () => document.getElementById('open-folder-btn')?.click(),
       new_idb: () => { import('./fs.js').then(m => m.initIDBSession()); },
     };
-    lb.textContent = result.mode === 'open_folder' ? '\ud83d\udcc1 Open Folder'
-      : result.mode === 'new_idb' ? '\ud83d\udfc4 New IDB Session'
+    lb.innerHTML = result.mode === 'open_folder'
+      ? '<i data-lucide="folder-open" style="width:13px;height:13px;vertical-align:middle;margin-right:4px"></i>Open Folder'
+      : result.mode === 'new_idb'
+        ? '<i data-lucide="plus-square" style="width:13px;height:13px;vertical-align:middle;margin-right:4px"></i>New Session'
         : 'Switch to ' + result.mode.toUpperCase();
+    if (window.lucide) lucide.createIcons({ el: lb });
     const disable = () => { lb.disabled = true; lb.style.opacity = '.4'; sb.disabled = true; sb.style.opacity = '.4'; };
     lb.onclick = () => { modeActions[result.mode]?.(); disable(); };
     sb.onclick = disable;
@@ -314,8 +320,9 @@ export function renderToolResult(name, result) {
     el.className = 'tool-result-note';
     el.style.cssText = 'font-size:11px;color:var(--txt3);padding:4px 8px;font-family:var(--mono);';
     el.innerHTML = result.success
-      ? '📄 Print dialog opened — save as PDF from your browser.'
-      : '❌ PDF failed: ' + esc(result.message || '');
+      ? '<i data-lucide="file-text" style="width:12px;height:12px;vertical-align:middle;margin-right:4px"></i>Print dialog opened — save as PDF from your browser.'
+      : '<i data-lucide="x-circle" style="width:12px;height:12px;vertical-align:middle;margin-right:4px;color:var(--red)"></i>PDF failed: ' + esc(result.message || '');
+    if (window.lucide) lucide.createIcons({ el });
     appendToTurn(el);
   }
 }
@@ -600,7 +607,34 @@ export async function updateFileTree(dir) {
         const e = document.createElement('div');
         e.className = 'fitem' + (it.type === 'dir' ? ' dir' : '');
         const fileIconSvg = it.type === 'dir' ? ICONS.folder(12) : fileIcon(it.name, 12);
-        e.innerHTML = '<span class="fitem-icon">' + fileIconSvg + '</span><span>' + esc(it.name) + '</span>';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = it.name;
+        nameSpan.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'fitem-icon';
+        iconSpan.innerHTML = fileIconSvg;
+
+        e.append(iconSpan, nameSpan);
+
+        // Download button for files (shown on hover via CSS)
+        if (it.type !== 'dir') {
+          const dlBtn = document.createElement('button');
+          dlBtn.className = 'fitem-dl-btn ibtn';
+          dlBtn.title = 'Download';
+          dlBtn.innerHTML = '<svg viewBox="0 0 14 14" fill="none" style="width:10px;height:10px"><path d="M7 1v8m0 0L4.5 6.5M7 9l2.5-2.5M1.5 12h11" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          dlBtn.onclick = async (ev) => {
+            ev.stopPropagation();
+            try {
+              const p = it.path || (S.fsMode === 'idb' ? target + it.name : it.name);
+              const c = await fsRead(p);
+              downloadContent(it.name, c);
+            } catch (er) { toast('Download error: ' + er.message); }
+          };
+          e.appendChild(dlBtn);
+        }
+
         e.onclick = async () => {
           if (it.type === 'dir') {
             el.dataset.filter = '';
@@ -610,7 +644,7 @@ export async function updateFileTree(dir) {
             try {
               const p = it.path || (S.fsMode === 'idb' ? target + it.name : it.name);
               const c = await fsRead(p);
-              showCodeBlk(it.name, c);
+              showFilePreview(it.name, c);
             } catch (er) { toast('Read error: ' + er.message); }
           }
         };
@@ -632,6 +666,113 @@ export async function updateFileTree(dir) {
 }
 
 // fileIcon is now imported from icons.js
+
+// ─── File Preview Modal ─────────────────────────────────────
+
+const IMAGE_EXTS = new Set(['png','jpg','jpeg','gif','webp','svg','bmp','ico']);
+const BINARY_EXTS = new Set(['pdf','zip','gz','tar','exe','bin','wasm','ttf','otf','woff','woff2','mp3','mp4','mov','avi']);
+
+function isBinaryExt(name) {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  return BINARY_EXTS.has(ext);
+}
+
+function isImageExt(name) {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  return IMAGE_EXTS.has(ext);
+}
+
+function downloadContent(name, content) {
+  const blob = new Blob([content], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+export function showFilePreview(name, content) {
+  // Remove any existing preview modal
+  document.getElementById('file-preview-modal')?.remove();
+
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  const lines = typeof content === 'string' ? content.split('\n').length : 0;
+  const size = typeof content === 'string'
+    ? (content.length > 1024 ? (content.length / 1024).toFixed(1) + ' KB' : content.length + ' B')
+    : '?';
+
+  const backdrop = document.createElement('div');
+  backdrop.id = 'file-preview-modal';
+  backdrop.className = 'modal-backdrop';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  const modal = document.createElement('div');
+  modal.className = 'modal file-preview-modal';
+
+  // Header
+  const hd = document.createElement('div');
+  hd.className = 'modal-hd';
+  hd.innerHTML = `
+    <span class="fpm-title">${esc(name)}</span>
+    <div style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+      <span class="fpm-meta">${isImageExt(name) ? '' : lines + ' lines · '}${size}</span>
+      <button class="btn sm fpm-dl-btn" title="Download file">
+        <svg viewBox="0 0 16 16" fill="none" style="width:11px;height:11px;vertical-align:middle;margin-right:3px"><path d="M8 2v8m0 0l-3-3m3 3l3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download
+      </button>
+      <button class="ibtn modal-close" style="width:26px;height:26px;">
+        <svg viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  `;
+
+  hd.querySelector('.modal-close').onclick = () => backdrop.remove();
+  hd.querySelector('.fpm-dl-btn').onclick = () => downloadContent(name, content);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'modal-body fpm-body';
+
+  if (isImageExt(name)) {
+    // Render image from text content (base64 or data URL)
+    const img = document.createElement('img');
+    img.style.cssText = 'max-width:100%;max-height:60vh;display:block;margin:0 auto;border-radius:6px;';
+    if (content.startsWith('data:') || content.startsWith('http')) {
+      img.src = content;
+    } else {
+      // Try treating as base64
+      try {
+        img.src = `data:image/${ext === 'svg' ? 'svg+xml' : ext};base64,${btoa(content)}`;
+      } catch {
+        img.alt = 'Cannot preview image';
+      }
+    }
+    body.appendChild(img);
+  } else if (isBinaryExt(name)) {
+    body.innerHTML = `<div style="color:var(--txt3);font-size:12px;padding:20px;text-align:center;">
+      Binary file — preview not available.<br>
+      <button class="btn sm" style="margin-top:12px;" id="fpm-dl2">Download to view</button>
+    </div>`;
+    body.querySelector('#fpm-dl2').onclick = () => downloadContent(name, content);
+  } else {
+    // Text / code preview
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.className = ext ? 'language-' + ext : '';
+    code.textContent = content;
+    pre.appendChild(code);
+    pre.style.cssText = 'margin:0;max-height:60vh;overflow:auto;font-size:12px;line-height:1.55;';
+    body.appendChild(pre);
+    if (typeof hljs !== 'undefined') {
+      try { hljs.highlightElement(code); } catch {}
+    }
+  }
+
+  modal.append(hd, body);
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+}
 
 function showCodeBlk(name, content) {
   document.getElementById('welcome')?.remove();

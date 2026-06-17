@@ -98,7 +98,7 @@ function renderInlineArtifact(art) {
       <button class="btn sm" data-act="open">Open</button>
       <button class="btn sm" data-act="copy">Copy</button>
       <button class="btn sm" data-act="download">Download</button>
-      <button class="btn sm" data-act="newtab">↗</button>
+      <button class="btn sm" data-act="newtab" title="Open in new tab"><i data-lucide="external-link" style="width:12px;height:12px"></i></button>
     </div>`;
 
   const body = document.createElement('div');
@@ -133,6 +133,7 @@ function renderInlineArtifact(art) {
 
   wrap.append(head, body);
   Bus.emit('turn:append', wrap);
+  if (window.lucide) lucide.createIcons({ el: head });
 }
 
 async function artifactAction(art, act) {

@@ -287,6 +287,15 @@ app.mount(
     name="js-assets",
 )
 
+# Serve assets/ (provider logos, icons, etc.) at /assets/*.
+_assets_dir = os.path.join(_PROJECT_ROOT, "assets")
+if os.path.isdir(_assets_dir):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_assets_dir, check_dir=True),
+        name="assets",
+    )
+
 _NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate"}
 
 
