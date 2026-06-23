@@ -627,9 +627,17 @@ export async function updateFileTree(dir) {
           dlBtn.onclick = async (ev) => {
             ev.stopPropagation();
             try {
-              const p = it.path || (S.fsMode === 'idb' ? target + it.name : it.name);
-              const c = await fsRead(p);
-              downloadContent(it.name, c);
+              const p = it.path || (S.fsMode === 'idb'
+                ? target + it.name
+                : (target && target !== '/' ? target.replace(/\/$/, '') + '/' + it.name : it.name));
+              if (S.fsMode === 'machine' && isImageExt(it.name)) {
+                const { machReadBlob } = await import('./fs.js');
+                const url = await machReadBlob(p);
+                downloadContent(it.name, url);
+              } else {
+                const c = await fsRead(p);
+                downloadContent(it.name, c);
+              }
             } catch (er) { toast('Download error: ' + er.message); }
           };
           e.appendChild(dlBtn);
@@ -638,13 +646,24 @@ export async function updateFileTree(dir) {
         e.onclick = async () => {
           if (it.type === 'dir') {
             el.dataset.filter = '';
-            const newDir = S.fsMode === 'idb' ? target + it.name + '/' : it.name;
+            const newDir = S.fsMode === 'idb'
+              ? target + it.name + '/'
+              : (target && target !== '/' ? target.replace(/\/$/, '') + '/' + it.name : it.name);
             await updateFileTree(newDir);
           } else {
             try {
-              const p = it.path || (S.fsMode === 'idb' ? target + it.name : it.name);
-              const c = await fsRead(p);
-              showFilePreview(it.name, c);
+              const p = it.path || (S.fsMode === 'idb'
+                ? target + it.name
+                : (target && target !== '/' ? target.replace(/\/$/, '') + '/' + it.name : it.name));
+              // For machine-mode images, read as blob URL instead of text
+              if (S.fsMode === 'machine' && isImageExt(it.name)) {
+                const { machReadBlob } = await import('./fs.js');
+                const url = await machReadBlob(p);
+                showFilePreview(it.name, url);
+              } else {
+                const c = await fsRead(p);
+                showFilePreview(it.name, c);
+              }
             } catch (er) { toast('Read error: ' + er.message); }
           }
         };
@@ -683,6 +702,14 @@ function isImageExt(name) {
 }
 
 function downloadContent(name, content) {
+  // content may be a blob: URL (machine-mode images), a data: URL, or plain text
+  if (typeof content === 'string' && (content.startsWith('blob:') || content.startsWith('data:'))) {
+    const a = document.createElement('a');
+    a.href = content;
+    a.download = name;
+    a.click();
+    return;
+  }
   const blob = new Blob([content], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -696,9 +723,10 @@ export function showFilePreview(name, content) {
   // Remove any existing preview modal
   document.getElementById('file-preview-modal')?.remove();
 
+  const isBlobUrl = typeof content === 'string' && content.startsWith('blob:');
   const ext = name.split('.').pop()?.toLowerCase() || '';
-  const lines = typeof content === 'string' ? content.split('\n').length : 0;
-  const size = typeof content === 'string'
+  const lines = (typeof content === 'string' && !isBlobUrl) ? content.split('\n').length : 0;
+  const size = (typeof content === 'string' && !isBlobUrl)
     ? (content.length > 1024 ? (content.length / 1024).toFixed(1) + ' KB' : content.length + ' B')
     : '?';
 
@@ -738,7 +766,7 @@ export function showFilePreview(name, content) {
     // Render image from text content (base64 or data URL)
     const img = document.createElement('img');
     img.style.cssText = 'max-width:100%;max-height:60vh;display:block;margin:0 auto;border-radius:6px;';
-    if (content.startsWith('data:') || content.startsWith('http')) {
+    if (content.startsWith('data:') || content.startsWith('http') || content.startsWith('blob:')) {
       img.src = content;
     } else {
       // Try treating as base64
@@ -819,7 +847,13 @@ export function renderConvList() {
     item.style.cssText = 'display:flex;align-items:center;gap:4px;';
     const info = document.createElement('div');
     info.style.cssText = 'flex:1;min-width:0;cursor:pointer;';
-    info.innerHTML = '<div class="conv-title">' + esc(c.title) + '</div><div class="conv-meta">' + new Date(c.modified).toLocaleDateString() + '</div>';
+    const dateStr = c.modified ? new Date(c.modified).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+    const rawContent = c.msgs?.find(m => m.role === 'user')?.content;
+    const fallback = Array.isArray(rawContent)
+      ? (rawContent.find(b => b.type === 'text')?.text || 'Image message')
+      : (typeof rawContent === 'string' ? rawContent : '');
+    const titleStr = c.title || fallback.slice(0, 50) || 'Untitled';
+    info.innerHTML = '<div class="conv-title">' + esc(titleStr) + '</div><div class="conv-meta">' + esc(dateStr) + '</div>';
     info.onclick = () => loadConv(c.id);
     const delBtn = document.createElement('button');
     delBtn.className = 'ibtn';

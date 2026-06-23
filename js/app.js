@@ -315,7 +315,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Restore previous IDB session on reload, if one was active.
-  if (S.idbSess && !S.fsMode) {
+  if (S.idbSess && S.fsMode === 'idb') {
     try {
       await switchWorkspace(S.idbSess);
     } catch {}

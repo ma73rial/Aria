@@ -263,6 +263,14 @@ export function initEvents() {
     }
   });
 
+  // Global Escape — close any open modal (file preview, etc.)
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('file-preview-modal');
+      if (modal) { modal.remove(); e.stopPropagation(); }
+    }
+  }, true);
+
   // Single unified input handler — auto-resize AND slash popup.
   inp.addEventListener('input', () => {
     inp.style.height = 'auto';

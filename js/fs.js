@@ -131,6 +131,16 @@ async function machRead(path) {
   return await (await r.handle.getFile()).text();
 }
 
+// Returns an object-URL (blob:// string) — caller must revoke when done.
+export async function machReadBlob(path) {
+  const q = parsePath(normPath(path));
+  const p = q.type === 'idb' ? q.p : (q.p || path.replace(/^[~\/]+/, ''));
+  const r = await machResolve(p);
+  if (!r || r.type !== 'file') throw new Error('File not found: ' + path);
+  const file = await r.handle.getFile();
+  return URL.createObjectURL(file);
+}
+
 async function machWrite(path, content) {
   const r = await machResolve(path, true);
   if (!r || r.type !== 'file') throw new Error('Cannot write to: ' + path);

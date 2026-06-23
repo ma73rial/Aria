@@ -175,6 +175,8 @@ export function loadState() {
   S.editHistory = JSON.parse(localStorage.getItem('aria_editHistory') || '[]');
   S.pendingDiffs = JSON.parse(localStorage.getItem('aria_pending_diffs') || '[]');
   S.idbSess  = localStorage.getItem('aria_idb_sess') || null;
+  S.fsMode   = localStorage.getItem('aria_fs_mode') || null;
+  S.cwd      = localStorage.getItem('aria_cwd') || '~';
   S.temperature = parseFloat(localStorage.getItem('aria_temp') || '0.7') || 0.7;
   S.maxTokens   = parseInt(localStorage.getItem('aria_maxtok') || '4096', 10);
   // Sync UI inputs
@@ -201,6 +203,10 @@ export function saveState() {
   else localStorage.removeItem('aria_pending_diffs');
   if (S.idbSess) localStorage.setItem('aria_idb_sess', S.idbSess);
   else localStorage.removeItem('aria_idb_sess');
+  if (S.fsMode) localStorage.setItem('aria_fs_mode', S.fsMode);
+  else localStorage.removeItem('aria_fs_mode');
+  if (S.cwd && S.cwd !== '~') localStorage.setItem('aria_cwd', S.cwd);
+  else localStorage.removeItem('aria_cwd');
   localStorage.setItem('aria_temp', String(S.temperature));
   localStorage.setItem('aria_maxtok', String(S.maxTokens));
 }

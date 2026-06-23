@@ -170,6 +170,18 @@ li { display: list-item; text-align: -webkit-match-parent; }
 .fitem.dir { color: var(--blue); }
 .fitem-icon { display: flex; align-items: center; flex-shrink: 0; }
 
+/* Download button — hidden until row is hovered */
+.fitem-dl-btn {
+  width: 20px !important; height: 20px !important;
+  flex-shrink: 0; opacity: 0; pointer-events: none;
+  border: none !important; background: none !important;
+  padding: 0; transition: opacity .12s;
+}
+.fitem:hover .fitem-dl-btn {
+  opacity: 0.55; pointer-events: all;
+}
+.fitem-dl-btn:hover { opacity: 1 !important; color: var(--acc) !important; }
+
 /* todo */
 .todo-item { display: flex; align-items: flex-start; gap: 6px; padding: 3px 2px; }
 .todo-cb {
@@ -1251,6 +1263,9 @@ li { display: list-item; text-align: -webkit-match-parent; }
 
 /* Mobile: file preview as bottom sheet */
 @media (max-width: 600px) {
+  .modal-backdrop:has(.file-preview-modal) {
+    align-items: flex-end;
+  }
   .file-preview-modal {
     width: 100%;
     max-width: 100%;
@@ -1270,17 +1285,18 @@ li { display: list-item; text-align: -webkit-match-parent; }
   position: fixed;
   inset: 0;
   z-index: 199;
-  background: rgba(0,0,0,0);
-  transition: background .22s ease;
+  background: rgba(0,0,0,.55);
+  opacity: 0;
   pointer-events: none;
+  transition: opacity .22s ease;
 }
 #sb-backdrop.visible {
-  display: block;
+  opacity: 1;
   pointer-events: all;
-  background: rgba(0,0,0,.55);
 }
 
 @media (max-width: 600px) {
+  #sb-backdrop { display: block; }
   /* Sidebar becomes a slide-in drawer, never pushes main */
   #sidebar {
     width: min(320px, 88vw) !important;
@@ -1291,10 +1307,9 @@ li { display: list-item; text-align: -webkit-match-parent; }
   #main.sb-open {
     margin-left: 0 !important;
   }
-  /* Show the backdrop scrim when sidebar is open */
+  /* body class fallback */
   body.sb-drawer-open #sb-backdrop {
-    display: block;
+    opacity: 1;
     pointer-events: all;
-    background: rgba(0,0,0,.55);
   }
 }
