@@ -4,3 +4,5 @@ overflow-fix.css.bak
 test-module.html
 server/__pycache__/
 node_modules/
+.mcp.json
+*.bak
